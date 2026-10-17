@@ -1,0 +1,197 @@
+name: Go CI (shared)
+
+# oagentkit org 统一 Go CI 门禁（reusable workflow）。
+# 各仓库 .github/workflows/ci.yml 只保留一个薄调用层，规则统一在本仓维护：
+#   jobs:
+#     ci:
+#       uses: oagentkit/.github/.github/workflows/go-ci.yml@main
+#       with:
+#         go-version: '1.26'
+# 规则变更只改本文件，所有引用 @main 的仓库立即生效（激进变更请改用 tag 引用）。
+
+on:
+  workflow_call:
+    inputs:
+      go-version:
+        description: 'Go 版本（setup-go 语义，如 1.24 解析为最新 1.24.x）'
+        required: false
+        type: string
+        default: '1.24'
+      golangci-lint-version:
+        description: 'golangci-lint 版本'
+        required: false
+        type: string
+        default: v2.14.0
+      coverage-threshold:
+        description: '总覆盖率下限（百分比）；0 = 关闭覆盖率门禁'
+        required: false
+        type: number
+        default: 30
+      test-script:
+        description: '根模块测试命令；产物含 coverage.out 时自动接覆盖率门禁'
+        required: false
+        type: string
+        default: 'go test -race -count=1 -coverprofile=coverage.out ./...'
+      additional-script:
+        description: '测试后的附加检查（多行 shell）；嵌套模块默认已自动测试，这里只放特例'
+        required: false
+        type: string
+        default: ''
+      test-nested:
+        description: '是否自动发现并测试嵌套 go.mod 子模块（build+test -race）'
+        required: false
+        type: boolean
+        default: true
+      govulncheck:
+        description: '是否运行 govulncheck 漏洞扫描（非阻塞报告；扫描用 CI 工具链，stdlib 修复随补丁版自愈）'
+        required: false
+        type: boolean
+        default: true
+      tidy-check:
+        description: '是否运行 go mod tidy -diff 门禁（检测 go.mod/go.sum 漂移：指向已删 tag 的版本地板、旧 import 路径、排序不规范等）'
+        required: false
+        type: boolean
+        default: true
+
+# 同一 ref 的重复触发取消旧 run（PR 连推 / main 连推不堆叠分钟数）
+concurrency:
+  group: go-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache: true
+
+      - name: Check go mod tidy
+        if: inputs.tidy-check
+        run: |
+          set -euo pipefail
+          go mod tidy -diff
+          # 嵌套子模块各自独立 go.mod，一并做 tidy 门禁
+          while IFS= read -r mod; do
+            dir=$(dirname "$mod")
+            [ "$dir" = "." ] && continue
+            case "$dir" in
+              ./vendor/*|./third_party/*|./testdata/*|./examples/*|./.git/*) continue ;;
+            esac
+            echo "::group::tidy ${dir#./}"
+            (cd "$dir" && go mod tidy -diff)
+            echo "::endgroup::"
+          done < <(find . -name go.mod -not -path './.git/*' | sort)
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l . | grep -v vendor || true)
+          if [ -n "$unformatted" ]; then
+            echo "以下文件需要格式化（请运行 make fmt）："
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: ${{ inputs.golangci-lint-version }}
+          args: --timeout 5m
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache: true
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Run tests
+        run: ${{ inputs.test-script }}
+
+      - name: Test nested modules
+        if: inputs.test-nested
+        run: |
+          set -euo pipefail
+          found=0
+          while IFS= read -r mod; do
+            dir=$(dirname "$mod")
+            [ "$dir" = "." ] && continue
+            case "$dir" in
+              ./vendor/*|./third_party/*|./testdata/*|./examples/*|./.git/*) continue ;;
+            esac
+            found=1
+            echo "::group::nested module ${dir#./}"
+            (cd "$dir" && go build ./... && go test -race -count=1 ./...)
+            echo "::endgroup::"
+          done < <(find . -name go.mod -not -path './.git/*' | sort)
+          if [ "$found" -eq 0 ]; then
+            echo "无嵌套子模块，跳过"
+          fi
+
+      - name: Run additional checks
+        if: inputs.additional-script != ''
+        run: ${{ inputs.additional-script }}
+
+      - name: govulncheck
+        if: inputs.govulncheck
+        # 非阻塞报告：发现漏洞亮黄注解但不挡合并（1.24/1.25 pin 的仓 stdlib 漏洞无 backport，阻塞会常红）
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./... 2>&1 | tee govulncheck.txt
+          {
+            echo "## govulncheck"
+            echo '```'
+            tail -n 40 govulncheck.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check coverage threshold
+        if: inputs.coverage-threshold > 0 && hashFiles('coverage.out') != ''
+        run: |
+          COVERAGE=$(go tool cover -func=coverage.out | tail -1 | awk '{print $3}' | tr -d '%')
+          THRESHOLD=${{ inputs.coverage-threshold }}
+          echo "Total coverage: ${COVERAGE}% (threshold ${THRESHOLD}%)"
+          {
+            echo "## Coverage"
+            echo ""
+            echo "| 指标 | 值 |"
+            echo "|---|---|"
+            echo "| 总覆盖率 | ${COVERAGE}% |"
+            echo "| 门禁阈值 | ${THRESHOLD}% |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "$COVERAGE" ]; then
+            echo "无法解析覆盖率数值"
+            exit 1
+          fi
+          if awk -v c="$COVERAGE" -v t="$THRESHOLD" 'BEGIN { exit !(c < t) }'; then
+            echo "覆盖率 ${COVERAGE}% 低于阈值 ${THRESHOLD}%" >> "$GITHUB_STEP_SUMMARY"
+            echo "覆盖率 ${COVERAGE}% 低于阈值 ${THRESHOLD}%"
+            exit 1
+          fi
+
+      - name: Upload coverage
+        if: hashFiles('coverage.out') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: coverage.out
+          retention-days: 14
