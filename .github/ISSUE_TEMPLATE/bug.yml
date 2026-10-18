@@ -6,8 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        提交后本 issue 会进入 [Issue 大盘](https://github.com/orgs/oagentkit/projects/1)。
-        标题请保留 `[模块]` 前缀，大盘按 Repository/Kind 分组更准。
+        标题请保留 `[模块]` 前缀，便于跨仓检索与归类。
   - type: input
     id: module
     attributes:
