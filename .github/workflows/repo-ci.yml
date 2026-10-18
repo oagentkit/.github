@@ -135,6 +135,16 @@ jobs:
           set -euo pipefail
           python3 matrix-tools/scripts/check_facade_imports.py --roots matrix
 
+      - name: 扫描文档里的陈旧包引用
+        # 防的是「看起来合法但已经错了」的结论。runtime/breaker 退役后，
+        # textx/AGENTS.md 仍把熔断归给 runtime/breaker —— 照着 import 会
+        # module not found，而人工 review 恰恰最容易漏这类（仓还在，只是包没了）。
+        run: |
+          set -euo pipefail
+          python3 matrix-tools/scripts/scan_stale_refs.py \
+            --matrix matrix-tools/modules.json \
+            --root . --verbose
+
   yaml:
     name: YAML
     runs-on: ubuntu-latest

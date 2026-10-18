@@ -6,7 +6,7 @@
 |---|---|
 | 报 bug / 提需求 | 目标模块仓的 issue（标题带 `[模块]` 前缀） |
 | 跨模块 / 矩阵拓扑问题 | [matrix-tools](https://github.com/oagentkit/matrix-tools/issues) |
-| 旧单仓路径迁移 | [agentkit/MIGRATION.md](https://github.com/oagentkit/agentkit/blob/main/MIGRATION.md)（46 条旧→新包路径映射） |
+| 旧单仓路径迁移 | [agentkit/MIGRATION.md](https://github.com/oagentkit/agentkit/blob/main/MIGRATION.md)（45 条旧→新包路径映射，另有 1 个已退役包） |
 | 查某个模块装哪版 | [versions.json](https://oagentkit.github.io/versions.json)（机器可读，CI 生成）或模块 README 安装行 |
 | 查 API / 能力面 | <https://oagentkit.github.io/llms.txt> + 各仓 `go doc` / `AGENTS.md` |
 | 安全漏洞 | 见 [SECURITY.md](SECURITY.md) —— **不要**开公开 issue |
