@@ -156,6 +156,23 @@ jobs:
             --matrix matrix-tools/modules.json \
             --root . --repos-dir matrix --verbose
 
+      - name: 门面仓发布地板守卫自测
+        # 同 check_facade_imports：必须证明这条守卫还活着。
+        # 判据里特意放了「门面接 v0.1.0」这个样本 —— 那是线上真实发生过的形态。
+        run: python3 matrix-tools/scripts/verify_facade_release.py --selftest
+
+      - name: 门面仓已发布 tag 的依赖地板
+        # 防的是「main 修好了、tag 没修」这类只有发版才暴露的缺陷。
+        # Go 的 MVS 只看被消费版本的 go.mod：门面仓 agentkit 若发 tag 时
+        # go.mod 还钉着 v0.1.0，消费方 go get 门面仓会静默拿到拆分初期的
+        # 13 个模块实现 —— 不报错、不告警、go build 照样过。
+        # 所以这里查的是**线上 tag**，不是 main。
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 matrix-tools/scripts/verify_facade_release.py --org oagentkit
+
   yaml:
     name: YAML
     runs-on: ubuntu-latest
