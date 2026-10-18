@@ -15,7 +15,7 @@ oagentkit 是 **开源 Go 模块矩阵**，各仓独立 SemVer 发版。
 **不要在公开 issue 里贴漏洞细节。**
 
 1. 使用 GitHub 私密漏洞报告：https://github.com/oagentkit/<repo>/security/advisories/new  
-   （任意模块仓皆可；跨模块问题报到 [oagentkit/agentkit](https://github.com/oagentkit/oagentkit/security/advisories/new)）
+   （任意模块仓皆可；跨模块问题报到 [oagentkit/agentkit](https://github.com/oagentkit/agentkit/security/advisories/new)）
 2. 或发邮件至维护者（见 org 页 / 各仓 `CODEOWNERS`）。
 
 请尽量包含：

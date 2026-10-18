@@ -1,6 +1,6 @@
 name: Bug 报告
 description: 行为不符合文档/预期——含复现与版本
-title: "[模块] 简述现象（例：[logx] error 值渲染为 {}）"
+title: "[模块] 简述现象（例：[llm] 降级链未记录切换原因）"
 labels: ["bug"]
 body:
   - type: markdown
@@ -11,8 +11,8 @@ body:
     id: module
     attributes:
       label: 模块与版本
-      description: "模块路径 + 版本，如 `github.com/oagentkit/logx@v0.3.0`（`go list -m` 可查）"
-      placeholder: "github.com/oagentkit/logx@v0.3.0"
+      description: "模块路径 + 版本，如 `github.com/oagentkit/llm@v0.1.0`（`go list -m` 可查）"
+      placeholder: "github.com/oagentkit/llm@v0.1.0"
     validations:
       required: true
   - type: textarea
