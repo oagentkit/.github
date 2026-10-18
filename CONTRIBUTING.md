@@ -1,17 +1,20 @@
 # 贡献指南 — oagentkit
 
-感谢参与 oagentkit（Open Agent Kit）模块矩阵。本文件是 **全 org 共享** 的贡献约定；单仓更细的工程红线见各仓 `AGENTS.md`。
+感谢参与 oagentkit（Open Agent Kit）模块矩阵。本文件是 **全 org 共享** 的贡献约定；
+单仓更细的工程红线见各仓 `AGENTS.md`。
 
-## 先看这 4 块大盘
+## 矩阵结构
 
-贡献不是单仓事务——开的 issue、提的 PR、发的版都会汇入 org 级 [GitHub Projects](https://github.com/orgs/oagentkit/projects)：
+贡献不是单仓事务 —— 13 个仓按 tier 严格自底向上，依赖方向是硬不变量：
 
-| 大盘 | 你什么时候会碰到它 |
+| tier | 模块 |
 |---|---|
-| [Issue 大盘](https://github.com/orgs/oagentkit/projects/1) | 提 issue 后自动出现在这里（标题带 `[模块]` 前缀更好归类） |
-| [版本大盘](https://github.com/orgs/oagentkit/projects/2) | 发版后对齐 Latest/Prior；装新依赖前查目标模块版本 |
-| [矩阵健康](https://github.com/orgs/oagentkit/projects/3) | 安装行/文档/门面壳漂移会亮红；PR 合入前顺手看一眼自己模块 |
-| [PR 审查队列](https://github.com/orgs/oagentkit/projects/4) | 提完 PR 请入队，避免跨仓 PR 被漏看 |
+| 0 | `textx` `runtime` `guardx` `queue` |
+| 1 | `promptx` `obs` `skillkit` `mcpkit` `rag` |
+| 2 | `llm` `toolgate` `tools` |
+| 3 | `agent` |
+
+tier N 的模块**不得**依赖 tier > N 的模块。
 
 ## 流程一览
 
@@ -19,10 +22,10 @@
   发现问题 / 有想法
         │
         ▼
-  开 Issue（标题: [模块] 简述）──────────► Issue 大盘 (Todo)
+  开 Issue（标题: [模块] 简述）
         │
         ▼
-  认领 / 开分支 / 提 PR ──────────────────► PR 审查队列 (待审)
+  认领 / 开分支 / 提 PR
         │
         ▼
   CI 门禁 (go-ci.yml) + 人工 review
@@ -32,51 +35,60 @@
         ▼
   合入 main
         │
-        ├── issue 关联关闭 ──► Issue 大盘 (Done)
-        ├── 发版打 tag ──────► 版本大盘刷新
-        └── 安装行/文档 ─────► matrix-tools 对齐，矩阵健康回绿
+        ├── issue 关联关闭
+        ├── 发版打 tag ──────► matrix-tools 刷新 versions.json
+        └── 安装行/文档 ─────► matrix-tools 对齐
 ```
 
 ## 开 Issue
 
-1. **选对仓库**：问题落在哪个模块就开在哪个仓；跨模块/矩阵拓扑问题开在 [oagentkit/agentkit](https://github.com/oagentkit/agentkit)。
-2. **标题带模块前缀**：`[logx] …`、`[retry] …`、`[matrix] …`——和矩阵描述对齐，大盘分组更准。
-3. **说清现状与建议**：我们偏好「现状（版本号 + 复现/证据）→ 影响 → 建议 → 验收」四段式；参考 [pkg#3](https://github.com/oagentkit/pkg/issues/3) 这类已有 issue 的写法。
+1. **选对仓库**：问题落在哪个模块就开在哪个仓；跨模块/矩阵拓扑问题开在
+   [matrix-tools](https://github.com/oagentkit/matrix-tools)。
+2. **标题带模块前缀**：`[llm] …`、`[mcpkit] …`、`[matrix] …` —— 便于跨仓检索归类。
+3. **说清现状与建议**：我们偏好「现状（版本号 + 复现/证据）→ 影响 → 建议 → 验收」四段式。
 4. **用模板**：仓库提供了 Bug / 特性 / 文档三类 issue 模板，按需选。
 
 ## 提 PR
 
-1. **先搜后提**：搜一下 Issue 大盘和目标仓的 open issue，已有就评论认领，别开重复的。
-2. **进 PR 审查队列**：PR 开出后执行
-   ```bash
-   gh project item-add 4 --owner oagentkit --url https://github.com/oagentkit/<repo>/pull/<n>
-   ```
-   在板上把 **Review** 拨到「待审」，**Scope** 选 feat/fix/docs/refactor/chore/ci。
-3. **一个 PR 一件事**：feat 与 refactor 不要搅在一起；0.x 阶段允许 breaking，但必须写进 CHANGELOG。
-4. **过 CI**：共享门禁 `oagentkit/.github/.github/workflows/go-ci.yml`（gofmt / golangci-lint / vet / race / govulncheck / 覆盖率）。本地至少跑通 `go test -race ./...`。
-5. **对齐既有风格**：Option 命名、错误哨兵、`AGENTS.md` 红线以目标仓为准；新增公共 API 请补 godoc 与测试。
+1. **先搜后提**：搜一下目标仓的 open issue，已有就评论认领，别开重复的。
+2. **一个 PR 一件事**：feat 与 refactor 不要搅在一起；0.x 阶段允许 breaking，但必须写进 CHANGELOG。
+3. **过 CI**：共享门禁 `oagentkit/.github/.github/workflows/go-ci.yml`
+   （gofmt / golangci-lint / vet / race / govulncheck / 覆盖率）。
+   本地至少跑通 `go test -race ./...`。
+4. **对齐既有风格**：Option 命名、错误哨兵、`AGENTS.md` 红线以目标仓为准；
+   新增公共 API 请补 godoc 与测试。
 
-## 发版与版本大盘
+## 发版
 
 - 版本方案 SemVer；0.x 阶段 minor 可 breaking，patch 只修不破。
-- 打完 tag 后更新：
-  - 该仓 README 安装行（或跑 `matrix-tools` 的 `refresh_versions.py --push`）
-  - [版本大盘](https://github.com/orgs/oagentkit/projects/2) 对应行的 **Latest / Prior**
+- 打完 annotated tag 后更新：
+  - 该仓 README 安装行
   - CHANGELOG
-- 嵌套模块（如 `logx/hlog`、`bootstrap/obs`）各自独立 tag，在版本大盘的 **Nested** 列注明。
+  - 跑 `matrix-tools/scripts/gen_versions.py --org oagentkit` 刷新 `versions.json`
+- oagentkit 当前**没有嵌套模块**（所有包都是三层路径 `github.com/oagentkit/<repo>/<pkg>`）。
+  将来若引入嵌套子模块，各自独立 tag 并在文档中注明归属。
 
 ## 矩阵卫生
 
-以下会被 [矩阵健康](https://github.com/orgs/oagentkit/projects/3) 和 `matrix-tools` 周巡检盯住：
+以下由 [matrix-tools](https://github.com/oagentkit/matrix-tools) 的
+`scripts/verify_split.py` 在拆分/发版时强制校验，任一失败 exit 1：
 
-- README 矩阵总览表与 `matrix.py` 描述一致
+- **覆盖度** —— `go list ./...` 的每个包都登记在 `modules.json`，无幽灵条目；
+  待退役包必须显式登记。
+- **分层方向** —— tier N 不得依赖 tier > N。
+- **依赖闭包** —— 每个模块的 `dependsOn` 必须覆盖其包的实际跨仓依赖。
+
+另外人工保持：
+
+- README 矩阵表与 `modules.json` 一致
 - 安装行版本 = 最新 tag
 - `AGENTS.md` / `CHANGELOG.md` 在场且不过期
-- 门面壳（可选能力进子包/嵌套模块）与声明一致
-- 不出现已废弃 import 路径（`yi-nology` / `openekit` / `ekit-`）
+- 不出现已废弃 import 路径（`git.enjoye.top/enjoydream/agentkit`、门面仓 `oagentkit/agentkit`）
 
-发现漂移 → 自动开 `matrix-drift` issue → 汇入 Issue 大盘。
+改动矩阵的正确姿势：改 `matrix-tools/modules.json` → 跑 `verify_split.py` 校验 →
+跑 `gen_docs.py` 重新生成各仓 README/AGENTS。**不要手改各仓文档**，会与矩阵漂移。
 
 ## 行为准则
 
-理性、就事论事、对代码严苛对人温和。issue/PR 评论只谈技术事实；有分歧时用可运行的对比（基准/语义测试/依赖图）说话。
+理性、就事论事、对代码严苛对人温和。issue/PR 评论只谈技术事实；
+有分歧时用可运行的对比（基准/语义测试/依赖图）说话。

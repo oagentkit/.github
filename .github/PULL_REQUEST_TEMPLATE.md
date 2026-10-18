@@ -13,12 +13,11 @@
 
 ## 检查清单
 
-- [ ] 已在 [PR 审查队列](https://github.com/orgs/oagentkit/projects/4) 入队（`gh project item-add 4 --owner oagentkit --url <pr-url>`），Review=待审，Scope 已选
-- [ ] 相关 issue 以 `Fixes #N` 关联（合入后自动进 Issue 大盘 Done）
+- [ ] 相关 issue 以 `Fixes #N` 关联（合入后自动关闭）
 - [ ] `go test -race ./...` 本地通过
 - [ ] 新增公共 API 有 godoc；行为变化写进 CHANGELOG
 - [ ] 不引入与模块定位不符的新依赖（尤其根包保持薄）
-- [ ] 若改了版本/安装行，知悉 [矩阵健康](https://github.com/orgs/oagentkit/projects/3) 与 [版本大盘](https://github.com/orgs/oagentkit/projects/2) 需同步
+- [ ] 若改了版本/安装行，记得跑 `matrix-tools/scripts/gen_versions.py --org oagentkit` 刷新 versions.json
 
 ## 兼容性
 

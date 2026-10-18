@@ -6,7 +6,6 @@ body:
   - type: markdown
     attributes:
       value: |
-        提交后进入 [Issue 大盘](https://github.com/orgs/oagentkit/projects/1)（Kind=Enhancement）。
         跨模块/矩阵拓扑类改动请开在 [oagentkit/agentkit](https://github.com/oagentkit/agentkit)。
   - type: input
     id: module

@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        文档类问题进 [Issue 大盘](https://github.com/orgs/oagentkit/projects/1)（Kind=Docs）。
+        文档类问题请在标题加 `[docs]` 前缀。
         站点源码在 [oagentkit/oagentkit.github.io](https://github.com/oagentkit/oagentkit.github.io)。
   - type: dropdown
     id: where

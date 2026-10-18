@@ -19,16 +19,10 @@ if [ "${1:-}" = "--pr" ]; then MODE=pr; shift; fi
 
 # 按仓覆盖（macOS bash 3.2 兼容：不用 declare -A）。
 # 未命中的仓用共享默认：覆盖率门禁 30、标准测试命令、test-nested 自动开。
+# oagentkit 全矩阵当前无需任何特例——此函数保留是为了将来某个仓要调覆盖率阈值或
+# 关闭 test-nested 时有地方落，而不是临时改共享 workflow。
 get_override() { # $1=repo basename → OV_THR/OV_TSCRIPT/OV_ASCRIPT/OV_NESTED（空串=共享默认）
   OV_THR=''; OV_TSCRIPT=''; OV_ASCRIPT=''; OV_NESTED=''
-  case "$1" in
-    # 示例仓只构建不测试，且不要嵌套自动测试噪音
-    ekit-kitex-examples)
-      OV_THR=0
-      OV_TSCRIPT='go build ./...'
-      OV_NESTED=false
-      ;;
-  esac
 }
 
 render_caller() { # $1=go_version $2=threshold $3=test_script $4=additional_script $5=test_nested
