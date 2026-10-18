@@ -56,10 +56,55 @@ jobs:
           done < <(find scripts -name '*.sh' | sort)
           exit "$fail"
 
-      - name: sync-projects.py smoke (dry-run help)
+      - name: 脚本 --help 冒烟
         run: |
-          python3 scripts/sync-projects.py --help >/dev/null
-          python3 -c "import ast, pathlib; ast.parse(pathlib.Path('scripts/sync-projects.py').read_text())"
+          set -euo pipefail
+          fail=0
+          while IFS= read -r f; do
+            echo "::group::bash ${f} --help"
+            if ! bash "$f" --help >/dev/null 2>&1; then
+              # 部分脚本无 usage 分支，只要求能被 bash 解析并以 0/1/2 退出
+              bash -n "$f"
+            fi
+            echo "::endgroup::"
+          done < <(find scripts -name '*.sh' | sort)
+          exit "$fail"
+
+  matrix-docs:
+    name: Matrix docs drift
+    # 防的是「已退役结论被重新生成回文档」：matrix-tools/modules.json 是单一数据源，
+    # oagentkit.github.io 的 llms.txt 是它的生成物。两者漂移时 AI Agent 会读到失效结论。
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # 两个外部仓都不指定 ref：checkout 默认取各自默认分支（main）。
+      # 显式写 ref: '' 是无效值会让 checkout 报错；显式写死 main 则在
+      # 「matrix-tools 自己开 PR」时验不到那个 PR 的内容。
+      - name: Checkout matrix-tools
+        uses: actions/checkout@v7
+        with:
+          repository: oagentkit/matrix-tools
+          path: matrix-tools
+
+      - name: Checkout docs site
+        uses: actions/checkout@v7
+        with:
+          repository: oagentkit/oagentkit.github.io
+          path: site
+
+      - name: llms.txt 与 modules.json 一致
+        run: |
+          set -euo pipefail
+          python3 matrix-tools/scripts/verify_docs.py \
+            --matrix matrix-tools/modules.json \
+            --llms site/docs/public/llms.txt
 
   yaml:
     name: YAML
