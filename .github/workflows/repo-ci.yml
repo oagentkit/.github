@@ -106,6 +106,35 @@ jobs:
             --matrix matrix-tools/modules.json \
             --llms site/docs/public/llms.txt
 
+      - name: 门面仓守卫自测
+        # 守卫脚本最危险的失效模式是「一直绿，但从没生效过」——
+        # 豁免名单写错一个字符，它就会静默放过所有违规。所以必须证明它还活着。
+        run: python3 matrix-tools/scripts/check_facade_imports.py --selftest
+
+      - name: Checkout 矩阵各仓（供门面仓扫描）
+        run: |
+          set -euo pipefail
+          mkdir -p matrix
+          while IFS= read -r repo; do
+            [ "$repo" = "matrix-tools" ] && continue
+            [ "$repo" = "oagentkit.github.io" ] && continue
+            [ "$repo" = ".github" ] && continue
+            echo "::group::checkout $repo"
+            git clone -q --depth 1 "https://github.com/oagentkit/${repo}.git" "matrix/$repo"
+            echo "::endgroup::"
+          done < <(python3 -c "
+          import json, pathlib
+          d = json.loads(pathlib.Path('matrix-tools/modules.json').read_text())
+          print('\n'.join(m['repo'] for m in d['modules']))
+          ")
+
+      - name: 扫描矩阵各仓是否仍引门面仓/旧单仓
+        # 门面仓 agentkit 计划 v1.x 后 archive。现在只有文档约束，
+        # 半年后有人写一个新 import 不会有人收到通知 —— 这条把它变成红灯。
+        run: |
+          set -euo pipefail
+          python3 matrix-tools/scripts/check_facade_imports.py --roots matrix
+
   yaml:
     name: YAML
     runs-on: ubuntu-latest
