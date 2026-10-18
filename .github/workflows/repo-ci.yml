@@ -145,6 +145,17 @@ jobs:
             --matrix matrix-tools/modules.json \
             --root . --verbose
 
+      - name: 检测幽灵包（仓里有、矩阵未登记）
+        # guardx/injectband 提交时带了代码 + 测试 + README，CI 全绿，
+        # 但没进 modules.json —— 于是它成了矩阵外的存在：消费方在
+        # versions.json / llms.txt 里看不到它，分层与依赖闭包门禁对它完全失效。
+        # **CI 绿不代表矩阵完整。**
+        run: |
+          set -euo pipefail
+          python3 matrix-tools/scripts/verify_ghost_packages.py \
+            --matrix matrix-tools/modules.json \
+            --root . --repos-dir matrix --verbose
+
   yaml:
     name: YAML
     runs-on: ubuntu-latest
