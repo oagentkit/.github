@@ -168,10 +168,36 @@ jobs:
             --matrix matrix-tools/modules.json \
             --root . --repos-dir matrix --verbose
 
+      - name: Checkout 门面仓（供 re-export 覆盖校验）
+        # 门面仓不在 modules.json 里（它不是矩阵模块，是兼容层），
+        # 所以上面那个 clone 循环不会带上它，得单独 checkout。
+        run: |
+          set -euo pipefail
+          git clone -q --depth 1 "https://github.com/oagentkit/agentkit.git" "matrix/agentkit"
+
+      - name: 门面仓 re-export 覆盖完整性
+        # 防的是「矩阵新增了一个包，门面没跟上」——实测 2026-10-19：
+        # 矩阵已 47 个包，门面只有 45 个，缺 toolgate/invoke 与 guardx/injectband。
+        # 后果不是编译失败，而是走门面的下游**根本够不到这两个包**：
+        # go get github.com/oagentkit/agentkit/invoke 直接 404。
+        #
+        # 与 verify_ghost_packages 是**反方向**的缺口：
+        #   ghost：仓里有、矩阵没登记 → 矩阵外的幽灵包
+        #   本条：矩阵里有、门面没转发 → 门面上的覆盖空洞
+        # 两者都缺，就是「矩阵不完整」在门面侧的表现。
+        run: |
+          set -euo pipefail
+          python3 matrix-tools/scripts/verify_facade_packages.py \
+            --matrix matrix-tools/modules.json \
+            --facade matrix/agentkit
+
       - name: 门面仓发布地板守卫自测
         # 同 check_facade_imports：必须证明这条守卫还活着。
         # 判据里特意放了「门面接 v0.1.0」这个样本 —— 那是线上真实发生过的形态。
         run: python3 matrix-tools/scripts/verify_facade_release.py --selftest
+
+      - name: 门面 re-export 覆盖守卫自测
+        run: python3 matrix-tools/scripts/verify_facade_packages.py --selftest
 
       - name: 门面仓已发布 tag 的依赖地板
         # 防的是「main 修好了、tag 没修」这类只有发版才暴露的缺陷。
@@ -179,6 +205,9 @@ jobs:
         # go.mod 还钉着 v0.1.0，消费方 go get 门面仓会静默拿到拆分初期的
         # 13 个模块实现 —— 不报错、不告警、go build 照样过。
         # 所以这里查的是**线上 tag**，不是 main。
+        #
+        # 基座 org（github.com/oekit/*）的依赖同样参与 MVS，一并查——
+        # 矩阵 13 个仓全绿但基座落后，是「半个 MVS 没查」，消费方照样拿不到新实现。
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

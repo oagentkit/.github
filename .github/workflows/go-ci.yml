@@ -70,10 +70,26 @@ permissions:
 #
 # GOPRIVATE 同时蕴含 GONOPROXY + GONOSUMDB，这里三个都显式写出，
 # 免得后来人只改一个就以为生效了。
+#
+# 为什么还包含 github.com/oekit/*：
+#   oekit 与 oagentkit 是同一个团队的 org（同一批维护者，仓库全 public），
+#   且是矩阵的公共基座——13 个模块仓大量以 oekit/pkg、oekit/concurrency、
+#   oekit/logx 为底座。按上面那段话自己的定义（"矩阵内的模块是**第一方**依赖"），
+#   oekit 落在同一条规则内，此前只是漏写了。
+#
+#   漏写的代价不是理论上的：实测 oekit/pkg 的 `go list -m -versions` 会列出
+#   远端**不存在**的 v0.9.2（ls-remote 只有 v0.9.1 / v0.9.3）——proxy 缓存里
+#   躺着幽灵版本，与 oagentkit 当初那次 tag 重置是同一个故障模式。
+#   走 proxy 时 `go mod tidy` 算出的是旧内容的 hash，写进 go.sum 后门禁全绿，
+#   而依赖的代码是错的。
+#
+#   代价是 oekit/* 不再经 sumdb 校验。这是有意取舍：oekit 是自家 org，
+#   与 oagentkit/* 用同一套信任模型，绕过 proxy 换来的直连一致性对等。
+#   若将来 oekit 变成真正的外部上游，这条要重新评估。
 env:
-  GOPRIVATE: github.com/oagentkit/*
-  GONOPROXY: github.com/oagentkit/*
-  GONOSUMDB: github.com/oagentkit/*
+  GOPRIVATE: github.com/oagentkit/*,github.com/oekit/*
+  GONOPROXY: github.com/oagentkit/*,github.com/oekit/*
+  GONOSUMDB: github.com/oagentkit/*,github.com/oekit/*
 
 jobs:
   lint:
