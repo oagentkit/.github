@@ -118,6 +118,26 @@ def gh_json(argv: list[str], *, what: str = "") -> object:
         raise SyncError(f"{what or ' '.join(argv[:3])} 返回非 JSON：{out[:200]}（{e}）")
 
 
+def gh_text(argv: list[str], *, what: str = "") -> str:
+    """跑 gh 并返回**原始文本**（不做 JSON 解析）。
+
+    实测（2026-10-20）：`gh api .../contents/<path> --jq .content` 输出的是
+    **裸 base64 文本**，不是 JSON。走 gh_json 会 json.loads(base64) 抛
+    JSONDecodeError，被上层 `except SyncError: continue` 吞掉，最终报
+    「模块清单读不到」——而这个错误完全指不到真正的原因（是解析方式错，
+    不是清单不在）。
+
+    更阴的是：本地跑时 `root/matrix-tools/modules.json` 存在，**永远走本地分支**，
+    这条 API 路径只有 CI 才执行得到 → 「本地全绿、CI 必红」。
+    所以取文件内容这类**非 JSON 输出**必须走 gh_text。
+    """
+    p = subprocess.run(["gh", *argv], text=True, capture_output=True)
+    if p.returncode != 0:
+        detail = (p.stderr or p.stdout).strip()
+        raise SyncError(f"{what or ' '.join(argv[:3])} 读取失败：{detail[:400]}")
+    return p.stdout.strip()
+
+
 def esc(s: str) -> str:
     """GraphQL 字符串字面量转义。"""
     return s.replace("\\", "\\\\").replace('"', '\\"')
@@ -149,7 +169,8 @@ def _read_manifest_text() -> tuple[str, str]:
 
     for path in (MANIFEST_PATH, f"scripts/{MANIFEST_PATH}"):
         try:
-            raw = gh_json(
+            # 走 gh_text 而非 gh_json：--jq .content 输出的是裸 base64，不是 JSON
+            raw = gh_text(
                 ["api", f"repos/{MANIFEST_REPO}/contents/{path}", "--jq", ".content"],
                 what=f"模块清单 {MANIFEST_REPO}/{path}",
             )
@@ -948,15 +969,63 @@ def refresh_module(mod: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def selftest() -> int:
+    """自测：强制走 **API 路径** 取模块清单，并验证它是可解析的 JSON。
+
+    为什么必须单独自测：`_read_manifest_text()` 在本地有 modules.json 时走本地分支，
+    API 分支**只有 CI 才执行得到**。实测（2026-10-20）就栽在这里——API 分支用
+    `gh_json` 解析 `--jq .content` 的裸 base64 输出，本地永远绿，CI 必红，
+    且报错是「模块清单读不到」，完全指不到真正原因。
+
+    所以：凡是「本地有文件就短路、只有 CI 才走到」的分支，都要有自测覆盖，
+    否则它会一直悄悄烂着。CI 里必须跑本自测。
+    """
+    print("=== selftest：模块清单 API 路径 ===")
+    # 1) API 取内容（base64 原文）
+    raw = gh_text(
+        ["api", f"repos/{MANIFEST_REPO}/contents/{MANIFEST_PATH}", "--jq", ".content"],
+        what=f"模块清单 {MANIFEST_REPO}/{MANIFEST_PATH}",
+    )
+    if not raw:
+        print("❌ API 返回空内容")
+        return 1
+    # 2) base64 解码后必须是合法 JSON
+    try:
+        text = base64.b64decode(raw).decode("utf-8")
+    except Exception as e:  # noqa: BLE001
+        print(f"❌ base64 解码失败：{e}")
+        return 1
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        print(f"❌ 解码后不是合法 JSON：{e}")
+        return 1
+    mods = data.get("modules")
+    infra = data.get("infraRepos")
+    if not isinstance(mods, list) or not mods:
+        print("❌ modules 缺失或为空")
+        return 1
+    if not isinstance(infra, list) or not infra:
+        print("❌ infraRepos 缺失或为空")
+        return 1
+    n_mod = sum(1 for m in mods if isinstance(m, dict) and m.get("repo"))
+    print(f"✅ API 路径可用：modules {n_mod} 个 + infraRepos {len(infra)} 个")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true", help="真正落盘（默认 dry-run）")
     ap.add_argument("--link", metavar="URL", help="即时把单条 issue/PR 挂进大盘")
     ap.add_argument("--state", default="open", help="--link 配套状态：open|closed|merged")
     ap.add_argument("--refresh-module", metavar="NAME", help="事件驱动：刷新单仓的板面字段")
+    ap.add_argument("--selftest", action="store_true",
+                    help="自测：强制走 API 路径取模块清单（CI 必须跑）")
     args = ap.parse_args()
 
     try:
+        if args.selftest:
+            return selftest()
         if args.link:
             link_item(args.link, args.state)
             print("\nOK")

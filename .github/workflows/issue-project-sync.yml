@@ -35,6 +35,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Selftest (manifest API path)
+        # 自测必须先跑：模块清单的 **API 路径** 在本地有文件时永远走不到，
+        # 只有 CI 才执行得到。实测（2026-10-20）就栽在这——API 分支用 JSON
+        # 解析器去解析裸 base64 输出，本地全绿、CI 必红，且报错指不到真正原因。
+        # 凡是「本地短路、只有 CI 才走到」的分支，都要有自测覆盖。
+        env:
+          GH_TOKEN: ${{ secrets.OAGENTKIT_PROJECT_TOKEN }}
+        run: python3 scripts/sync-projects.py --selftest
+
       - name: Sync org board
         env:
           # GITHUB_TOKEN 默认无 project scope，走 PAT。
