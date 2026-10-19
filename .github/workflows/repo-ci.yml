@@ -84,6 +84,13 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Set up Go
+        # 门面符号级门禁的提取器是 go/parser 程序（matrix-tools/scripts/symdump），
+        # 只用标准库，但要有 go 工具链。版本与全矩阵一致（CI go-version 1.26）。
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
       # 两个外部仓都不指定 ref：checkout 默认取各自默认分支（main）。
       # 显式写 ref: '' 是无效值会让 checkout 报错；显式写死 main 则在
       # 「matrix-tools 自己开 PR」时验不到那个 PR 的内容。
@@ -224,6 +231,26 @@ jobs:
           set -euo pipefail
           python3 matrix-tools/scripts/verify_facade_packages.py \
             --matrix matrix-tools/modules.json \
+            --facade matrix/agentkit
+
+      - name: 门面仓符号级转发完整性
+        # 上一条查的是**包**的覆盖，这条查的是**包内符号**的覆盖——
+        # 两者是不同的洞：包齐全 ≠ 符号齐全。
+        #
+        # 实测 2026-10-20：47 个门面包里有 3 个包漏转发 23 个上游导出符号
+        # （textutil 11 / logredact 11 / policy 1），另有 131 处上游 const
+        # 被门面转发成 var。后果是下游按门面 import 直接编译失败
+        # （undefined: textutil.Tokens 等），而三条既有门面守卫全绿。
+        #
+        # 判据是**独立 oracle**：go/parser 直接解析上游源码与门面 alias.go
+        # 求差集，不比对任何生成物。规则本体在 matrix-tools/scripts/。
+        #
+        # ⚠️ 顺序依赖：本 job 拉的是 matrix-tools 的 **main**，
+        # 所以这条门禁必须先在 matrix-tools 仓合入，本 PR 才可能变绿。
+        run: |
+          set -euo pipefail
+          python3 matrix-tools/scripts/verify_facade_symbols.py \
+            --root matrix \
             --facade matrix/agentkit
 
       - name: 门面仓发布地板守卫自测
