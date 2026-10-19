@@ -36,6 +36,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ORG = os.environ.get("ORG", "oagentkit")
@@ -58,25 +59,62 @@ class SyncError(RuntimeError):
 
 
 def gql(query: str, **variables: str) -> dict:
-    args = ["gh", "api", "graphql", "-f", f"query={query}"]
+    args = ["api", "graphql", "-f", f"query={query}"]
     for k, v in variables.items():
         # Int! project number needs typed JSON; everything else stays string
         if k == "number" and str(v).isdigit():
             args += ["-F", f"{k}={v}"]
         else:
             args += ["-f", f"{k}={v}"]
-    p = subprocess.run(args, text=True, capture_output=True)
-    if p.returncode != 0:
-        detail = (p.stderr or p.stdout).strip()
-        raise SyncError(f"gh api graphql 失败：{detail[:500]}")
+    out = _run_gh(args, what="gh api graphql")
     try:
-        data = json.loads(p.stdout)
+        data = json.loads(out)
     except json.JSONDecodeError as e:
-        raise SyncError(f"gh api graphql 返回非 JSON：{p.stdout[:200]}（{e}）")
+        raise SyncError(f"gh api graphql 返回非 JSON：{out[:200]}（{e}）")
     if "errors" in data:
         msgs = "; ".join(str(e.get("message", e)) for e in data["errors"])
         raise SyncError(f"GraphQL 报错：{msgs}")
     return data["data"]
+
+
+def _is_transient(detail: str) -> bool:
+    """判断 gh 的失败输出是不是**瞬时**错误（可重试）。
+
+    实测（2026-10-20）：批量 GraphQL mutation 偶发 `gh: HTTP 502`，
+    一次 502 就让整轮同步失败——但同步是**每小时**跑的，瞬时错误不该造成
+    一次完整的空转（看板该更新的没更新，且下一次要等一小时）。
+
+    只对**服务端/限流类**错误重试：5xx、429、超时、连接被重置。
+    认证失败、权限不足、GraphQL 语义错误（errors 数组）一律**不重试**——
+    那些重试多少次都一样，只会浪费时间并把真因埋掉。
+    """
+    d = (detail or "").lower()
+    markers = (
+        "http 500", "http 502", "http 503", "http 504", "http 429",
+        "bad gateway", "service unavailable", "gateway timeout",
+        "timeout", "timed out", "connection reset", "connection refused",
+        "unexpected eof", "temporary failure", "rate limit",
+    )
+    return any(m in d for m in markers)
+
+
+def _run_gh(args: list[str], *, what: str, retries: int = 3) -> str:
+    """跑 gh，遇到瞬时错误按 2s/6s 退避重试；返回 stdout。
+
+    非瞬时错误立刻抛 SyncError——**不吞错**：门禁要能指到真正的原因。
+    """
+    last = ""
+    for attempt in range(retries):
+        p = subprocess.run(["gh", *args], text=True, capture_output=True)
+        if p.returncode == 0:
+            return p.stdout
+        last = (p.stderr or p.stdout).strip()
+        if attempt == retries - 1 or not _is_transient(last):
+            raise SyncError(f"{what} 失败：{last[:500]}")
+        wait = 2 * (3 ** attempt)
+        print(f"  · 瞬时错误（{last[:100]}），{wait}s 后重试（{attempt + 1}/{retries - 1}）")
+        time.sleep(wait)
+    raise SyncError(f"{what} 失败：{last[:500]}")  # pragma: no cover
 
 
 def gql_batch(mutations: list[str], *, chunk: int = 20) -> list[dict]:
@@ -90,14 +128,14 @@ def gql_batch(mutations: list[str], *, chunk: int = 20) -> list[dict]:
         group = mutations[start : start + chunk]
         parts = [f"  m{i}: {m}" for i, m in enumerate(group)]
         query = "mutation {\n" + "\n".join(parts) + "\n}"
-        args = ["gh", "api", "graphql", "-f", f"query={query}"]
-        p = subprocess.run(args, text=True, capture_output=True)
-        if p.returncode != 0:
-            raise SyncError(f"批量 GraphQL 失败：{(p.stderr or p.stdout).strip()[:500]}")
+        out = _run_gh(
+            ["api", "graphql", "-f", f"query={query}"],
+            what="批量 GraphQL",
+        )
         try:
-            data = json.loads(p.stdout)
+            data = json.loads(out)
         except json.JSONDecodeError as e:
-            raise SyncError(f"批量 GraphQL 返回非 JSON：{p.stdout[:200]}（{e}）")
+            raise SyncError(f"批量 GraphQL 返回非 JSON：{out[:200]}（{e}）")
         payload = data.get("data") or {}
         for i in range(len(group)):
             results.append(payload.get(f"m{i}"))
