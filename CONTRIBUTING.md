@@ -61,10 +61,32 @@ tier N 的模块**不得**依赖 tier > N 的模块。
 ## 发版
 
 - 版本方案 SemVer；0.x 阶段 minor 可 breaking，patch 只修不破。
-- 打完 annotated tag 后更新：
-  - 该仓 README 安装行
-  - CHANGELOG
-  - 跑 `matrix-tools/scripts/gen_versions.py --org oagentkit` 刷新 `versions.json`
+
+### ⚠️ 顺序：CHANGELOG 必须在 tag **之前**
+
+```
+特性 PR 合入 main
+   → 预写待发版段：python3 matrix-tools/scripts/gen_changelogs.py --repo <仓> --root <各仓父目录> --next-version vX.Y.Z
+   → 提交 CHANGELOG.md（走 PR 或直推都行）
+   → 打 annotated tag vX.Y.Z（**落在那个 CHANGELOG 提交之后**）
+   → 之后才更新：该仓 README 安装行 / 跑 gen_versions.py --org oagentkit 刷新 versions.json
+```
+
+**为什么不能反**（实测 2026-10-20，matrix-tools#17/#24/#28）：
+
+下游 `go get` 拿到的是 **tag 快照**。如果先打 tag、再补 CHANGELOG，
+tag 快照里的 CHANGELOG.md 就**缺该 tag 自己的版本段**——发布说明残缺。
+`verify_changelog_at_tag.py`（T2）会当场抓出，而 tag 受 `protect-tags` ruleset
+保护**不可重打**，只能记进 `matrix-tools/scripts/changelog_tag_debt.json` 欠账基线。
+实测这一条错误顺序已经制造了 25 条存量欠账（`llm@v0.13.0`、`agentkit@v1.8.14` 等）。
+
+**预写还有两个前提**（#28 实测，缺一仍会破）：
+
+1. **预写必须晚于特性合入**：先在 main 上预写、再合特性分支，预写时区间里还没有
+   特性提交，段里会写成「与上一版相比无代码差异」，事后重生成却多出特性段 → 不一致。
+2. **走 PR 也没问题**：#28 起版本段剔除「只改 CHANGELOG.md 的提交」与「merge commit」，
+   所以「预写 → 提交 → 走 PR 合并 → 打 tag」与「直推打 tag」产出**逐字节一致**的 CHANGELOG。
+
 - oagentkit 当前**没有嵌套模块**（所有包都是三层路径 `github.com/oagentkit/<repo>/<pkg>`）。
   将来若引入嵌套子模块，各自独立 tag 并在文档中注明归属。
 
