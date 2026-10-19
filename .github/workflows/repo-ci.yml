@@ -175,6 +175,36 @@ jobs:
           set -euo pipefail
           git clone -q --depth 1 "https://github.com/oagentkit/agentkit.git" "matrix/agentkit"
 
+      - name: 各仓 CHANGELOG 未过期
+        # CONTRIBUTING 要求各仓 CHANGELOG.md 在场且不过期。此前 13 个仓一个都没有，
+        # 现在由 matrix-tools/scripts/gen_changelogs.py 从 git 历史生成并守住一致性。
+        #
+        # 判据是「按 tag 切段重生成的结果 == 提交版」：发版后忘了重生成就会红。
+        # 不用「文件存在」当判据——存在但内容停在三个月前，同样是「不过期」的反面。
+        #
+        # ⚠️ 这里必须**完整克隆**：上面那个 clone 循环是 --depth 1，浅克隆没有 tag，
+        # 生成器会拿 0 个版本段去比对，报出「已过期」的假红。所以另开一份完整克隆。
+        run: |
+          set -euo pipefail
+          rm -rf matrix-full
+          mkdir -p matrix-full
+          for repo in $(python3 -c "
+          import json, pathlib
+          d = json.loads(pathlib.Path('matrix-tools/modules.json').read_text())
+          print('\n'.join(m['repo'] for m in d['modules']))
+          "); do
+            git clone -q "https://github.com/oagentkit/${repo}.git" "matrix-full/$repo"
+          done
+          # 门面仓不在 modules.json 里，但它同样有 CHANGELOG 要求
+          git clone -q "https://github.com/oagentkit/agentkit.git" "matrix-full/agentkit"
+
+          fail=0
+          for repo in $(ls matrix-full); do
+            python3 matrix-tools/scripts/gen_changelogs.py \
+              --root matrix-full --repo "$repo" --check || fail=1
+          done
+          exit "$fail"
+
       - name: 门面仓 re-export 覆盖完整性
         # 防的是「矩阵新增了一个包，门面没跟上」——实测 2026-10-19：
         # 矩阵已 47 个包，门面只有 45 个，缺 toolgate/invoke 与 guardx/injectband。
