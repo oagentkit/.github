@@ -1,0 +1,64 @@
+# 各模块仓放置于 .github/workflows/issue-to-project.yml
+# 目的：issue/PR 开闭、tag 推送 → 立刻进/刷 org 大盘。
+# 依赖 oagentkit/.github 的 scripts/sync-projects.py（checkout 下游仓复用权威版本）。
+#
+# 注意：secret OAGENTKIT_PROJECT_TOKEN 必须在本仓配好（各仓 secret，
+# GITHUB_TOKEN 无 project scope）。铺装用 oagentkit/.github 的
+# scripts/sync-project-hooks.sh。
+
+name: 即时入板
+
+on:
+  issues:
+    types: [opened, closed, reopened]
+  pull_request:
+    types: [opened, closed, reopened]
+  push:
+    # 根 tag（v0.9.0）与嵌套 tag（textx/v0.1.2）都算发版
+    tags: ['*']
+    branches: [main, master]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: issue-to-project-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  link:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # 脚本在治理仓，这里借检出拿权威版本
+      - uses: actions/checkout@v7
+        with:
+          repository: oagentkit/.github
+          ref: main
+
+      - name: Link issue/PR to org board
+        if: github.event_name == 'issues' || github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.OAGENTKIT_PROJECT_TOKEN }}
+          ORG: oagentkit
+          PROJECT: '1'
+          URL: ${{ github.event.issue.html_url || github.event.pull_request.html_url }}
+          STATE: ${{ github.event.pull_request.merged && 'merged' || github.event.issue.state || github.event.pull_request.state }}
+        run: |
+          set -euo pipefail
+          echo "link $URL state=$STATE"
+          python3 scripts/sync-projects.py --link "$URL" --state "$STATE"
+
+      - name: Refresh module after tag push
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.OAGENTKIT_PROJECT_TOKEN }}
+          ORG: oagentkit
+          PROJECT: '1'
+          MODULE: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+          echo "refresh module=$MODULE"
+          python3 scripts/sync-projects.py --refresh-module "$MODULE"

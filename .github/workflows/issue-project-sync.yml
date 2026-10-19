@@ -1,0 +1,47 @@
+name: 大盘同步
+
+# org issue / PR ↔ GitHub Projects 大盘自动对齐。
+# Projects v2 不会自动纳入跨仓 issue/PR，也不会跟进 tag——定时补齐。
+# 事件触发只覆盖本仓（oagentkit/.github），跨仓靠下面的轮询。
+#
+# 失败语义：脚本内部任何一步读不到（token 无 project 权限 / 看板读不到 /
+# 某仓读不到 / 同步后审计缺条目）都非零退出，本 workflow 直接红掉，
+# 绝不出现「N/M 仓被跳过、报告仍显示通过」。
+
+on:
+  schedule:
+    # 每小时一次（避开整点，降压）
+    # 用 :23 而不是 :17——oekit 的同款轮询在 :17，两边错开。
+    - cron: '23 * * * *'
+  workflow_dispatch:
+  issues:
+    types: [opened, closed, reopened]
+  pull_request:
+    types: [opened, closed, reopened]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: issue-project-sync
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Sync org board
+        env:
+          # GITHUB_TOKEN 默认无 project scope，走 PAT。
+          # 所需权限：project（读写）+ read:org + repo
+          GH_TOKEN: ${{ secrets.OAGENTKIT_PROJECT_TOKEN }}
+          ORG: oagentkit
+          PROJECT: '1'
+        run: |
+          set -euo pipefail
+          python3 scripts/sync-projects.py --apply
