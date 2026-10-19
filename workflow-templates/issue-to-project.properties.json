@@ -1,0 +1,8 @@
+{
+    "name": "Link issues and pull requests to the org board",
+    "description": "Immediately add issues and pull requests to the oagentkit Issue board.",
+    "iconName": "octicon project",
+    "categories": [
+        "Automation"
+    ]
+}
