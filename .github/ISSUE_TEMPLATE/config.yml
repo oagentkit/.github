@@ -6,6 +6,9 @@ contact_links:
   - name: 版本矩阵
     url: https://oagentkit.github.io/versions.json
     about: 查各模块最新 tag / 上一版 / 层级归属（机器可读）
+  - name: Issue 大盘
+    url: https://github.com/orgs/oagentkit/projects/1
+    about: 跨仓 issue 统一视图——新 issue 一小时内入板并派单
   - name: 安全漏洞（私密）
     url: https://github.com/oagentkit/.github/blob/main/SECURITY.md
     about: 请勿公开披露——走私密漏洞报告
