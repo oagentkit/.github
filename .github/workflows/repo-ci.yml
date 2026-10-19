@@ -199,7 +199,12 @@ jobs:
           git clone -q "https://github.com/oagentkit/agentkit.git" "matrix-full/agentkit"
 
           fail=0
-          for repo in $(ls matrix-full); do
+          # 用 glob 而不是遍历 `ls` 的输出：后者过不了 actionlint 的 SC2045
+          # （遍历 ls 输出不健壮），且目录名含空格就出错。
+          # ⚠️ 注释里**不要以 "shellcheck" 开头**——shellcheck 会把这种注释
+          # 当成它自己的指令解析，报 SC1072「Expected '=' after directive key」。
+          for dir in matrix-full/*/; do
+            repo=$(basename "$dir")
             python3 matrix-tools/scripts/gen_changelogs.py \
               --root matrix-full --repo "$repo" --check || fail=1
           done
