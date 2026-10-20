@@ -225,3 +225,44 @@ jobs:
           name: coverage
           path: coverage.out
           retention-days: 14
+
+  changelog-coverage:
+    name: CHANGELOG coverage
+    # 「两级覆盖」门禁（issue matrix-tools#41）：直接扫**原始 git 历史**算「应当出现的
+    # 条目与正文」，与提交版 CHANGELOG.md 比对。
+    #
+    # 为什么必须**独立于生成器**：门禁若复用 gen_changelogs.py 的解析/渲染函数，
+    # 生成器丢 body 时门禁会跟着一起丢——门禁比的正是「丢 body 之后的结果」，
+    # 于是门禁全绿而发布说明已经残缺。实测 2026-10-20：7 个仓合计 773 处正文缺失，
+    # 逐字节门禁一条都没报出来。
+    #
+    # 范围按「**谁造成漂移谁负责**」裁剪（issue #41 裁决 2）：
+    #   PR 事件 → 只校验**本 PR 触及的仓**（= PR 的 base 仓），且用 **PR head** 的
+    #             内容校验（只裁剪不换 ref 解决不了问题：合入前各仓 main 上还是旧产物）；
+    #   非 PR 事件（push / 定时 / 手动）→ 全矩阵（**周期性全量审计兜底**，不可省，
+    #             否则是漏检）。
+    #
+    # 本 job 跑在**调用方仓**（模块仓）里，所以 GITHUB_REPOSITORY 就是被改的仓
+    # ⇒ PR 触及的仓 = 本仓 ⇒ 改 agent 的 PR 只被 agent 的 CHANGELOG 欠账挡住。
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout matrix-tools（规则本体）
+        # 门禁脚本在 matrix-tools 仓；这里只取它的脚本，不取调用方仓的代码
+        # （调用方仓的代码由 lint / test 两个 job 负责）。
+        uses: actions/checkout@v7
+        with:
+          repository: oagentkit/matrix-tools
+          path: matrix-tools
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: CHANGELOG 覆盖（独立 oracle；PR 只查本 PR 触及的仓）
+        # 覆盖判据要读**完整历史**（tag 区间 + 每个 commit 的 body），
+        # 脚本内部自己完整克隆并 fetch PR head。
+        run: python3 matrix-tools/scripts/verify_changelog_coverage.py --ci --org oagentkit
+
