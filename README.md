@@ -89,14 +89,21 @@ jobs:
 ## 矩阵健康怎么保证
 
 CI 门禁管的是**单个仓**的质量。**跨仓的矩阵不变量**由
-[matrix-tools](https://github.com/oagentkit/matrix-tools) 的
-`scripts/verify_split.py` 保证，三项硬校验，任一失败 exit 1：
+[matrix-tools](https://github.com/oagentkit/matrix-tools) 的脚本判定：
 
-1. **覆盖度** —— `go list ./...` 的每个包都登记在 `modules.json`，无幽灵条目；
-   待退役包必须显式登记（不静默跳过）。
-2. **分层方向** —— tier N 的模块不得依赖 tier > N（自底向上不变量）。
-3. **依赖闭包** —— 每个模块的 `dependsOn` 必须覆盖其包的实际跨仓依赖。
+1. **分层方向** —— tier N 的模块不得依赖 tier > N（自底向上不变量）：
+   `scripts/verify_import_direction.py`（读**真实 import 图**，不是声明图）。
+2. **覆盖度** —— `go list ./...` 的每个包都登记在 `modules.json`，无幽灵条目；
+   待退役包必须显式登记（不静默跳过）：`scripts/verify_ghost_packages.py`。
+3. **依赖闭包** —— 声明的 `dependsOn` 必须覆盖实际跨仓依赖：
+   `verify_import_direction.py` 的「未声明 / 陈旧声明」判定。
 
+> ⚠️ 截至 2026-10-21 实测：`verify_import_direction.py` **尚未接进任何 CI**；
+> `scripts/verify_split.py`（覆盖度 / 分层方向 / 依赖闭包 三项）只校验**声明图**，
+> 且数据路径仍指向已退役的 agentkit 单仓（实跑报 `FileNotFoundError`）——
+> **别把它当成在跑的门禁**。人工核对命令：
+> `python3 matrix-tools/scripts/verify_import_direction.py --root <各仓父目录>`
+>
 > ⚠️ 依赖闭包这项有个实现坑：`go list -f` 的模板必须用**逗号**分隔 imports。
 > 用换行会让每个包跨多行，`splitlines()` 只取到第一行（通常是 `context`），
 > 校验会**静默空转** —— 看起来全绿，实则什么都没查。
@@ -115,11 +122,15 @@ CI 门禁管的是**单个仓**的质量。**跨仓的矩阵不变量**由
 - **新增仓库**：拷上面的接入模板，改 `go-version` 即可；或跑
   `scripts/sync-callers.sh <repo-dir>` 从旧版完整 ci.yml 自动生成薄调用层。
 - **矩阵变更**：改 [matrix-tools/modules.json](https://github.com/oagentkit/matrix-tools)
-  后跑 `verify_split.py`，再跑 `gen_docs.py` 重新生成各仓 README/AGENTS。
+  后跑 `verify_import_direction.py` 校验真实 import 图，再跑 `gen_docs.py` 重新生成各仓 README/AGENTS。
+- **改 profile 分层**：分层表写在 `profile/README.md` 的生成区里，数据源是 `modules.json`。
+  改完数据源后在本仓跑 `python3 scripts/verify_profile_tiers.py --write` 重生成；
+  CI（`repo-ci.yml` 的 `matrix-docs` job）会逐 tier 逐仓比对，漂了判红。
 
 ## 目录
 
 ```
+AGENTS.md                                # 本仓的工程红线（谁在改本仓，先读这份）
 .github/workflows/go-ci.yml              # 共享 reusable workflow（Go 门禁规则本体）
 .github/workflows/issue-auto-assign.yml  # 新 issue 自动分配（可 reusable）
 .github/workflows/repo-ci.yml            # 规则仓自身脚本/YAML CI
@@ -135,5 +146,6 @@ SECURITY.md                              # 安全策略 / 私密披露
 SUPPORT.md                               # 支持渠道索引
 scripts/sync-callers.sh                  # 模块仓 ci.yml → 薄调用层 批量迁移脚本
 scripts/sync-dependabot.sh               # 模块仓 dependabot 批量同步
+scripts/verify_profile_tiers.py          # profile 分层表 vs modules.json 漂移门禁
 templates/dependabot-gomod.yml           # 模块仓 dependabot 模板
 ```
