@@ -182,39 +182,43 @@ jobs:
           set -euo pipefail
           git clone -q --depth 1 "https://github.com/oagentkit/agentkit.git" "matrix/agentkit"
 
-      - name: 各仓 CHANGELOG 未过期
+      - name: 各仓 CHANGELOG 未过期（PR 范围裁剪）
         # CONTRIBUTING 要求各仓 CHANGELOG.md 在场且不过期。此前 13 个仓一个都没有，
         # 现在由 matrix-tools/scripts/gen_changelogs.py 从 git 历史生成并守住一致性。
         #
-        # 判据是「按 tag 切段重生成的结果 == 提交版」：发版后忘了重生成就会红。
-        # 不用「文件存在」当判据——存在但内容停在三个月前，同样是「不过期」的反面。
+        # 两道门禁，关注点分离（issue matrix-tools#41）：
+        #   ① 独立 oracle：直接扫**原始 git 历史**算「应当出现的条目与正文」，
+        #      与提交版比对——**不复用生成器的解析函数**，否则生成器丢 body 时
+        #      门禁跟着一起丢（实测 7 仓 773 处正文缺失，逐字节门禁一条没报出来）；
+        #   ② 生成器侧：提交版是否覆盖生成器的产出（且相对顺序未被打乱）。
         #
-        # ⚠️ 这里必须**完整克隆**：上面那个 clone 循环是 --depth 1，浅克隆没有 tag，
-        # 生成器会拿 0 个版本段去比对，报出「已过期」的假红。所以另开一份完整克隆。
+        # ⚠️ 范围按「**谁造成漂移谁负责**」裁剪（issue #41 裁决 2）：
+        #   PR 事件 → 只校验**本 PR 触及的仓**，且用 **PR head** 的内容校验
+        #             （只裁剪不换 ref 解决不了问题——合入前各仓 main 上还是旧产物）；
+        #   非 PR 事件（push / 定时 / 手动）→ 全矩阵（**周期性全量审计兜底**，不可省，
+        #             否则是漏检）。
+        #   改造前每个 PR 都全 org 扫 14 个仓 ⇒ 任一模块欠账堵住所有无关 PR
+        #   （实测 oagentkit/.github#15 被卡两天）。
+        #
+        # 范围判定的**唯一逻辑来源**是 oracle 的 --print-scope（它读 GitHub 事件上下文）：
+        # 两条门禁共用同一份判定，别在这个 YAML 里另造一份。
+        #
+        # ⚠️ 克隆必须**完整**（浅克隆没有 tag，生成器会拿 0 个版本段去比对，
+        # 报出「已过期」的假红）。脚本内部自己完整克隆，不需要这里的 clone 循环。
         run: |
           set -euo pipefail
-          rm -rf matrix-full
-          mkdir -p matrix-full
-          for repo in $(python3 -c "
-          import json, pathlib
-          d = json.loads(pathlib.Path('matrix-tools/modules.json').read_text())
-          print('\n'.join(m['repo'] for m in d['modules']))
-          "); do
-            git clone -q "https://github.com/oagentkit/${repo}.git" "matrix-full/$repo"
-          done
-          # 门面仓不在 modules.json 里，但它同样有 CHANGELOG 要求
-          git clone -q "https://github.com/oagentkit/agentkit.git" "matrix-full/agentkit"
+          # ① 独立 oracle（自带克隆 + fetch PR head）
+          python3 matrix-tools/scripts/verify_changelog_coverage.py \
+            --ci --org oagentkit --clone-dir matrix-coverage
 
+          # ② 生成器侧判据——复用 ① 已克隆好的仓（同一批 clone，含 PR head checkout）
           fail=0
-          # 用 glob 而不是遍历 `ls` 的输出：后者过不了 actionlint 的 SC2045
-          # （遍历 ls 输出不健壮），且目录名含空格就出错。
-          # ⚠️ 注释里**不要以 "shellcheck" 开头**——shellcheck 会把这种注释
-          # 当成它自己的指令解析，报 SC1072「Expected '=' after directive key」。
-          for dir in matrix-full/*/; do
-            repo=$(basename "$dir")
+          while IFS=$'\t' read -r repo ref; do
+            [ -z "$repo" ] && continue
             python3 matrix-tools/scripts/gen_changelogs.py \
-              --root matrix-full --repo "$repo" --check || fail=1
-          done
+              --root matrix-coverage --repo "$repo" --check || fail=1
+          done < <(python3 matrix-tools/scripts/verify_changelog_coverage.py \
+                     --ci --print-scope)
           exit "$fail"
 
       - name: 门面仓 re-export 覆盖完整性
