@@ -212,13 +212,15 @@ jobs:
             --ci --org oagentkit --clone-dir matrix-coverage
 
           # ② 生成器侧判据——复用 ① 已克隆好的仓（同一批 clone，含 PR head checkout）
+          #    这里只要仓名：ref 由 ① 的克隆负责（同一个 clone-dir，已 checkout 到
+          #    PR head），用 cut -f1 取掉第二列，免得留个没人用的变量。
           fail=0
-          while IFS=$'\t' read -r repo ref; do
+          while IFS= read -r repo; do
             [ -z "$repo" ] && continue
             python3 matrix-tools/scripts/gen_changelogs.py \
               --root matrix-coverage --repo "$repo" --check || fail=1
           done < <(python3 matrix-tools/scripts/verify_changelog_coverage.py \
-                     --ci --print-scope)
+                     --ci --print-scope | cut -f1)
           exit "$fail"
 
       - name: 门面仓 re-export 覆盖完整性
