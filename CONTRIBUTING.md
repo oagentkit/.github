@@ -146,7 +146,7 @@ tag 快照里的 CHANGELOG.md 就**缺该 tag 自己的版本段**——发布�
   `verify_import_direction.py` 的「未声明 / 陈旧声明」判定。
 
 ⚠️ 截至 2026-10-21 实测：`verify_import_direction.py` **尚未接进任何 CI**；
-`scripts/verify_split.py`（覆盖度 / 分层方向 / 依赖闭包 三项）只校验**声明图**，
+`scripts/verify_split.py`（覆盖度 / 分层方向 / 依赖闭包 三项，即将退役删除）只校验**声明图**，
 且数据路径仍指向退役的 agentkit 单仓（实跑报
 `FileNotFoundError: docs/split-matrix/modules.json`）——**别把它当成在跑的门禁**。
 人工核对命令：

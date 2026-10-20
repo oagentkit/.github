@@ -71,7 +71,7 @@ tier N 的模块不得依赖 tier > N 的模块 —— 这条不变量由
 `matrix-tools/scripts/verify_import_direction.py` 判定（它读真实 import 图，不是声明图）。
 
 ⚠️ 截至 2026-10-21 实测，`verify_import_direction.py` **尚未接进任何 CI**；
-`verify_split.py` 只校验声明图，且数据路径仍指向退役的 agentkit 单仓
+`verify_split.py`（即将退役删除）只校验声明图，且数据路径仍指向退役的 agentkit 单仓
 （实跑报 `FileNotFoundError: docs/split-matrix/modules.json`）。
 所以这条不变量目前**靠人工核对**，命令：
 

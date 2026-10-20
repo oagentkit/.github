@@ -38,7 +38,10 @@ oagentkit 是 **开源 Go 模块矩阵**，各仓独立 SemVer 发版。
 ## 依赖与扫描
 
 - 共享 CI 已启用 `govulncheck`（非阻塞报告）；模块侧若发现 **可利用的传递依赖漏洞**，请按上述渠道报。
-- `matrix-tools` 的 `verify_split.py` 会抓矩阵分层/依赖闭包漂移；安全相关回移请同时开一条普通 issue 跟踪（可不含细节）留痕。
+- 矩阵分层 / 依赖闭包 / 布局的漂移由 matrix-tools 的守卫判定
+  （`verify_import_direction.py` 读**真实 import 图**、`verify_import_paths.py` 校验布局、
+  `verify_ghost_packages.py` 查幽灵包）；安全相关回移请同时开一条普通 issue 跟踪
+  （可不含细节）留痕。
 
 ## 密钥与凭据
 

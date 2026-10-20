@@ -91,17 +91,29 @@ jobs:
 CI 门禁管的是**单个仓**的质量。**跨仓的矩阵不变量**由
 [matrix-tools](https://github.com/oagentkit/matrix-tools) 的脚本判定：
 
-1. **分层方向** —— tier N 的模块不得依赖 tier > N（自底向上不变量）：
-   `scripts/verify_import_direction.py`（读**真实 import 图**，不是声明图）。
-2. **覆盖度** —— `go list ./...` 的每个包都登记在 `modules.json`，无幽灵条目；
-   待退役包必须显式登记（不静默跳过）：`scripts/verify_ghost_packages.py`。
-3. **依赖闭包** —— 声明的 `dependsOn` 必须覆盖实际跨仓依赖：
-   `verify_import_direction.py` 的「未声明 / 陈旧声明」判定。
+| 不变量 | 判据脚本 |
+|---|---|
+| **覆盖度** —— 每个包都登记在 `modules.json`，无幽灵条目（未登记的包 / 缺登记的包） | `scripts/verify_ghost_packages.py` |
+| **分层方向** —— tier N 的模块不得依赖 tier > N（自底向上不变量） | `scripts/verify_import_direction.py` |
+| **依赖闭包** —— 声明的 `dependsOn` 必须覆盖其包的实际跨仓依赖 | `scripts/verify_import_direction.py` |
+| **布局** —— 各仓 `go.mod` 的 module 行 / `importPath` 与矩阵一致 | `scripts/verify_import_paths.py` |
 
-> ⚠️ 截至 2026-10-21 实测：`verify_import_direction.py` **尚未接进任何 CI**；
-> `scripts/verify_split.py`（覆盖度 / 分层方向 / 依赖闭包 三项）只校验**声明图**，
-> 且数据路径仍指向已退役的 agentkit 单仓（实跑报 `FileNotFoundError`）——
-> **别把它当成在跑的门禁**。人工核对命令：
+> **旧脚本 `verify_split.py` 即将退役删除。** 它的三项职责（覆盖度 / 分层方向 /
+> 依赖闭包）已分别由上表的守卫接手。
+>
+> 它当年被文档写成「在每次拆分/发版时强制校验」，其实**不成立**：没有被任何 CI 引用，
+> 且数据路径 `docs/split-matrix/modules.json` 在当前布局下已不存在
+> （实跑报 `FileNotFoundError`）——**别再把它当成在跑的门禁**。
+>
+> **新脚本强在哪**：旧脚本只校验 `modules.json` 里**声明的** `dependsOn` 图——
+> 而声明会漂，**在漂了的声明图上做层级校验，等于什么都没校验**。
+> `verify_import_direction.py` 读**真实 import 图**（`go list` 编译器视角：
+> 事实来自编译器，不来自手写声明），并额外判定「依赖未声明」与「声明已陈旧」。
+> 它还是**独立 oracle**：不 import 任何生成器，判定逻辑不复用生成器的解析函数——
+> 生成器与门禁共用解析函数，正是「共同盲区」的来源。
+>
+> ⚠️ 截至 2026-10-21 实测：`verify_import_direction.py` **尚未接进任何 CI**，
+> 人工核对命令：
 > `python3 matrix-tools/scripts/verify_import_direction.py --root <各仓父目录>`
 >
 > ⚠️ 依赖闭包这项有个实现坑：`go list -f` 的模板必须用**逗号**分隔 imports。
@@ -122,7 +134,8 @@ CI 门禁管的是**单个仓**的质量。**跨仓的矩阵不变量**由
 - **新增仓库**：拷上面的接入模板，改 `go-version` 即可；或跑
   `scripts/sync-callers.sh <repo-dir>` 从旧版完整 ci.yml 自动生成薄调用层。
 - **矩阵变更**：改 [matrix-tools/modules.json](https://github.com/oagentkit/matrix-tools)
-  后跑 `verify_import_direction.py` 校验真实 import 图，再跑 `gen_docs.py` 重新生成各仓 README/AGENTS。
+  后跑 `verify_import_direction.py` 校验真实 import 图、`verify_import_paths.py` 校验布局，
+  再跑 `gen_docs.py` 重新生成各仓 README/AGENTS。
 - **改 profile 分层**：分层表写在 `profile/README.md` 的生成区里，数据源是 `modules.json`。
   改完数据源后在本仓跑 `python3 scripts/verify_profile_tiers.py --write` 重生成；
   CI（`repo-ci.yml` 的 `matrix-docs` job）会逐 tier 逐仓比对，漂了判红。

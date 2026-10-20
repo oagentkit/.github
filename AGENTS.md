@@ -63,7 +63,7 @@ CONTRIBUTING.md / SECURITY.md / SUPPORT.md
 - **不承诺没做的事**：文档里写「某脚本会强制校验」时，要么它真的接进了 CI，
   要么写明「人工核对」并给出核对命令。
   门禁正文与接线**必须成对**——「文档说有门禁、实际没接线」是本仓反复出现的坑
-  （`verify_split.py` 只校验声明图且数据路径指向已退役的 agentkit 单仓，
+  （`verify_split.py` 即将退役删除：它只校验声明图且数据路径指向已退役的 agentkit 单仓，
   实跑报 `FileNotFoundError`；`verify_import_direction.py` 读真实 import 图，但尚未接进 CI）。
 - **矩阵数据只认 matrix-tools 仓**：`modules.json`（分层）、`versions.json`（版本矩阵）、
   `gen_llms_txt.py`（llms.txt）。本仓**不另存副本**——副本就是下一次漂移的起点。
