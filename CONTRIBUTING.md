@@ -1,7 +1,9 @@
 # 贡献指南 — oagentkit
 
 感谢参与 oagentkit（Open Agent Kit）模块矩阵。本文件是 **全 org 共享** 的贡献约定；
-单仓更细的工程红线见各仓 `AGENTS.md`。
+13 个业务模块仓更细的工程红线见各仓根目录的 `AGENTS.md`，
+基建仓（`.github` / `matrix-tools` / 门面 `agentkit` / 文档站）见各自 README 与本仓的
+[AGENTS.md](https://github.com/oagentkit/.github/blob/main/AGENTS.md)。
 
 ## 矩阵结构
 
@@ -9,12 +11,16 @@
 
 | tier | 模块 |
 |---|---|
-| 0 | `textx` `runtime` `guardx` `queue` |
-| 1 | `promptx` `obs` `skillkit` `mcpkit` `rag` |
-| 2 | `llm` `toolgate` `tools` |
+| 0 | `guardx` `runtime` `textx` |
+| 1 | `promptx` |
+| 2 | `llm` `mcpkit` `obs` `queue` `rag` `skillkit` `toolgate` `tools` |
 | 3 | `agent` |
 
 tier N 的模块**不得**依赖 tier > N 的模块。
+
+> 上表与 `matrix-tools/modules.json`（单一数据源）逐仓一致，由本仓
+> `scripts/verify_profile_tiers.py` 在 CI 里比对。**改分层请先改数据源**，
+> 不要手改这张表。
 
 ## 流程一览
 
@@ -37,6 +43,7 @@ tier N 的模块**不得**依赖 tier > N 的模块。
         │
         ├── issue 关联关闭
         ├── 发版打 tag ──────► matrix-tools 刷新 versions.json
+        │                        ──► 拷到站点副本 + 同步站点 data/modules.json
         └── 安装行/文档 ─────► matrix-tools 对齐
 ```
 
@@ -64,12 +71,13 @@ tier N 的模块**不得**依赖 tier > N 的模块。
 
 ### ⚠️ 顺序：CHANGELOG 必须在 tag **之前**
 
+**第 1–3 步（单仓内，顺序不可反）**
+
 ```
 特性 PR 合入 main
-   → 预写待发版段：python3 matrix-tools/scripts/gen_changelogs.py --repo <仓> --root <各仓父目录> --next-version vX.Y.Z
-   → 提交 CHANGELOG.md（走 PR 或直推都行）
-   → 打 annotated tag vX.Y.Z（**落在那个 CHANGELOG 提交之后**）
-   → 之后才更新：该仓 README 安装行 / 跑 gen_versions.py --org oagentkit 刷新 versions.json
+  1. 预写待发版段：python3 matrix-tools/scripts/gen_changelogs.py --repo <仓> --root <各仓父目录> --next-version vX.Y.Z
+  2. 提交 CHANGELOG.md（走 PR 或直推都行）
+  3. 打 annotated tag vX.Y.Z（**落在那个 CHANGELOG 提交之后**）
 ```
 
 **为什么不能反**（实测 2026-10-20，matrix-tools#17/#24/#28）：
@@ -78,7 +86,7 @@ tier N 的模块**不得**依赖 tier > N 的模块。
 tag 快照里的 CHANGELOG.md 就**缺该 tag 自己的版本段**——发布说明残缺。
 `verify_changelog_at_tag.py`（T2）会当场抓出，而 tag 受 `protect-tags` ruleset
 保护**不可重打**，只能记进 `matrix-tools/scripts/changelog_tag_debt.json` 欠账基线。
-实测这一条错误顺序已经制造了 25 条存量欠账（`llm@v0.13.0`、`agentkit@v1.8.14` 等）。
+实测这一条错误顺序已经制造了 **27** 条存量欠账（`llm@v0.13.0`、`agentkit@v1.8.14` 等）。
 
 **预写还有两个前提**（#28 实测，缺一仍会破）：
 
@@ -87,28 +95,77 @@ tag 快照里的 CHANGELOG.md 就**缺该 tag 自己的版本段**——发布�
 2. **走 PR 也没问题**：#28 起版本段剔除「只改 CHANGELOG.md 的提交」与「merge commit」，
    所以「预写 → 提交 → 走 PR 合并 → 打 tag」与「直推打 tag」产出**逐字节一致**的 CHANGELOG。
 
+**第 4 步（跨仓，刷新版本矩阵）**
+
+```
+4. 刷新矩阵源：cd matrix-tools && python3 scripts/gen_versions.py --org oagentkit
+   → 提交 matrix-tools/versions.json（**先合源**）
+   → cp matrix-tools/versions.json oagentkit.github.io/docs/public/versions.json
+   → 同步站点 data/modules.json（站点的矩阵数据源，与 modules.json 同源）
+   → 提交站点仓
+```
+
+**为什么第 4 步不能反**（实测 2026-10-21）：
+
+**源是权威、副本是派生物**。矩阵源 `matrix-tools/versions.json` 是权威，
+站点 `docs/public/versions.json` 是它的**逐字节副本**（`verify_versions_drift.py`
+要求两者全等，含 `latest`）。所以必须**先刷源、再拷副本**：
+
+- 先改副本 → 逐字节门禁判红（副本 ≠ 源）；
+- **更隐蔽的一条**：源陈旧时，`verify_versions_drift.py` 给的修法文案方向是**反的**——
+  它只会说「把源 cp 到站点」，于是把**陈旧的源**覆盖到站点，
+  漂移从「源旧」变成「源旧 + 站点旧」。实测 2026-10-21：
+  矩阵源的门面 `latest` 还是 `v1.8.20`，而 `agentkit` 最新 tag 已是 `v1.8.21`——
+  源陈旧、站点副本反而更新，此时照抄门禁文案只会把陈旧扩散到全网。
+
+**第 4 步的连带义务**：站点 `data/modules.json` 与 matrix-tools `modules.json` 同源。
+矩阵新增包或改分层时必须同步它，并重跑站点的生成器
+（`python3 scripts/gen_module_pages.py --check` 校验生成物是否已更新）。
+实测 2026-10-21：站点 `data/modules.json` 曾缺 `llm/port`（站点副本落后于矩阵源）——
+就是这一步缺失的直接后果。
+
+**⚠️ 重生成 CHANGELOG 会吞掉待发版段**
+
+`gen_changelogs.py` **无参重生成只按已存在的 tag 切段**，不产出「待发版」段。
+于是第 1 步预写的段会被整段吞掉，第 3 步的 tag 快照又缺自己那一段——
+直接复制回第 1 步犯的错。`--next-version vX.Y.Z` 是**唯一**能产出待发版段的开关：
+任何时候要重生成 CHANGELOG，都必须带上它，否则等于撤销第 1 步。
+
 - oagentkit 当前**没有嵌套模块**（所有包都是三层路径 `github.com/oagentkit/<repo>/<pkg>`）。
   将来若引入嵌套子模块，各自独立 tag 并在文档中注明归属。
 
 ## 矩阵卫生
 
-以下由 [matrix-tools](https://github.com/oagentkit/matrix-tools) 的
-`scripts/verify_split.py` 在拆分/发版时强制校验，任一失败 exit 1：
+矩阵不变量由 [matrix-tools](https://github.com/oagentkit/matrix-tools) 的脚本判定：
 
+- **分层方向** —— tier N 不得依赖 tier > N：
+  `scripts/verify_import_direction.py`（读**真实 import 图**，不是声明图）。
 - **覆盖度** —— `go list ./...` 的每个包都登记在 `modules.json`，无幽灵条目；
-  待退役包必须显式登记。
-- **分层方向** —— tier N 不得依赖 tier > N。
-- **依赖闭包** —— 每个模块的 `dependsOn` 必须覆盖其包的实际跨仓依赖。
+  待退役包必须显式登记：`scripts/verify_ghost_packages.py`。
+- **依赖闭包** —— 声明的 `dependsOn` 必须覆盖实际跨仓依赖：
+  `verify_import_direction.py` 的「未声明 / 陈旧声明」判定。
+
+⚠️ 截至 2026-10-21 实测：`verify_import_direction.py` **尚未接进任何 CI**；
+`scripts/verify_split.py`（覆盖度 / 分层方向 / 依赖闭包 三项，即将退役删除）只校验**声明图**，
+且数据路径仍指向退役的 agentkit 单仓（实跑报
+`FileNotFoundError: docs/split-matrix/modules.json`）——**别把它当成在跑的门禁**。
+人工核对命令：
+
+```bash
+python3 matrix-tools/scripts/verify_import_direction.py --root <各仓父目录>
+```
 
 另外人工保持：
 
-- README 矩阵表与 `modules.json` 一致
+- README 矩阵表与 `modules.json` 一致（profile 的 tier 表已由本仓
+  `scripts/verify_profile_tiers.py` 在 CI 里逐仓守住）
 - 安装行版本 = 最新 tag
 - `AGENTS.md` / `CHANGELOG.md` 在场且不过期
 - 不出现已废弃 import 路径（`git.enjoye.top/enjoydream/agentkit`、门面仓 `oagentkit/agentkit`）
 
-改动矩阵的正确姿势：改 `matrix-tools/modules.json` → 跑 `verify_split.py` 校验 →
-跑 `gen_docs.py` 重新生成各仓 README/AGENTS。**不要手改各仓文档**，会与矩阵漂移。
+改动矩阵的正确姿势：改 `matrix-tools/modules.json` → 跑
+`verify_import_direction.py` 校验（真实 import 图）→ 跑 `gen_docs.py` 重新生成
+各仓 README/AGENTS。**不要手改各仓文档**，会与矩阵漂移。
 
 ## 行为准则
 

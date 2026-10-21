@@ -113,6 +113,23 @@ jobs:
             --matrix matrix-tools/modules.json \
             --llms site/docs/public/llms.txt
 
+      - name: profile 分层表与 modules.json 一致
+        # profile 是 org 的门面页（人类与 AI Agent 的第一入口），
+        # 它给出的分层必须与单一数据源一致。
+        # 实测 2026-10-21：profile 的 tier 表曾在 5 个仓上与 modules.json 冲突
+        # （queue 被写在 tier0、实为 tier2；obs/skillkit/mcpkit/rag 被写在 tier1、实为 tier2），
+        # 而当时**没有任何门禁会报出来**——CI 全绿，门面页给的是错的分层。
+        #
+        # 判据是「逐项一致」：按 tier 比对仓的集合（双向，缺一多一都判红），
+        # 不比文案；profile 的 tier 表必须落在生成区标记之间（标记被删 = 判红）。
+        # 修法是改 matrix-tools/modules.json（数据源说了算），再跑
+        # `python3 scripts/verify_profile_tiers.py --write` 重生成。
+        run: |
+          set -euo pipefail
+          python3 scripts/verify_profile_tiers.py \
+            --matrix matrix-tools/modules.json \
+            --profile profile/README.md
+
       - name: 站点 versions.json 是 matrix-tools 的逐字节副本
         # 上一步查的是「生成物 vs 数据源」。这一步查的是「副本 vs 原件」——
         # 站点 docs/public/versions.json 是 matrix-tools/versions.json 的拷贝，
