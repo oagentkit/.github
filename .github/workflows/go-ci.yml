@@ -105,6 +105,22 @@ jobs:
           go-version: ${{ inputs.go-version }}
           cache: true
 
+      - name: Download deps (retry on transient proxy errors)
+        # 见 Test job 里的同名步骤：proxy 偶发 HTTP/2 stream error 会把整条 pipeline 标红，
+        # 而代码无缺陷。先带重试把依赖拉下来，后续步骤走本地缓存。
+        run: |
+          set -euo pipefail
+          ok=0
+          for i in 1 2 3 4 5; do
+            if go mod download; then
+              echo "deps downloaded (attempt $i)"
+              ok=1; break
+            fi
+            echo "::warning::go mod download 失败（第 $i/5 次），$((i*15))s 后重试"
+            sleep $((i*15))
+          done
+          [ "$ok" = "1" ] || { echo "::error::go mod download 连续 5 次失败"; exit 1; }
+
       - name: Check go mod tidy
         if: inputs.tidy-check
         run: |
@@ -150,6 +166,24 @@ jobs:
           go-version: ${{ inputs.go-version }}
           cache: true
 
+      - name: Download deps (retry on transient proxy errors)
+        # 依赖下载偶发撞上 proxy.golang.org 的 HTTP/2 stream error（实测 2026-10-20：
+        # oekit/registry 与 oekit/nns 的 main CI 因 'stream error: stream ID 17; INTERNAL_ERROR'
+        # 变红——同 commit 重跑即绿，**代码无缺陷**）。一次网络抖动就把 main 标红 →
+        # 红色失去信号价值（误报多了会被忽略）。先带重试把依赖拉下来，后续步骤走本地缓存。
+        run: |
+          set -euo pipefail
+          ok=0
+          for i in 1 2 3 4 5; do
+            if go mod download; then
+              echo "deps downloaded (attempt $i)"
+              ok=1; break
+            fi
+            echo "::warning::go mod download 失败（第 $i/5 次），$((i*15))s 后重试"
+            sleep $((i*15))
+          done
+          [ "$ok" = "1" ] || { echo "::error::go mod download 连续 5 次失败"; exit 1; }
+
       - name: Go vet
         run: go vet ./...
 
@@ -169,7 +203,19 @@ jobs:
             esac
             found=1
             echo "::group::nested module ${dir#./}"
-            (cd "$dir" && go build ./... && go test -race -count=1 ./...)
+            (
+              cd "$dir"
+              ok=0
+              for i in 1 2 3 4 5; do
+                if go mod download; then
+                  ok=1; break
+                fi
+                echo "::warning::nested $dir 依赖下载失败（第 $i/5 次），$((i*15))s 后重试"
+                sleep $((i*15))
+              done
+              [ "$ok" = "1" ] || { echo "::error::nested $dir 依赖连续 5 次拉取失败"; exit 1; }
+              go build ./... && go test -race -count=1 ./...
+            )
             echo "::endgroup::"
           done < <(find . -name go.mod -not -path './.git/*' | sort)
           if [ "$found" -eq 0 ]; then
