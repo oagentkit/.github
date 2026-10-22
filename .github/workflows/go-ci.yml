@@ -53,10 +53,10 @@ on:
         type: boolean
         default: true
       changelog-scope:
-        description: 'CHANGELOG 覆盖门禁在**非 PR 事件**（push / 定时 / 手动）下的范围口径：matrix = 全矩阵（旧口径，默认）；repo = 只校验调用方本仓（全矩阵审计由 matrix-tools 的每日定时 job 承担）'
+        description: 'CHANGELOG 覆盖门禁在**非 PR 事件**（push / 定时 / 手动）下的范围口径：matrix = 全矩阵（旧口径）；repo = 只校验调用方本仓（全矩阵审计由 matrix-tools 的每日定时 job 承担）'
         required: false
         type: string
-        default: 'matrix'
+        default: 'repo'
 
 # 同一 ref 的重复触发取消旧 run（PR 连推 / main 连推不堆叠分钟数）
 concurrency:
@@ -291,15 +291,18 @@ jobs:
     #   PR 事件 → 只校验**本 PR 触及的仓**（= PR 的 base 仓），且用 **PR head** 的
     #             内容校验（只裁剪不换 ref 解决不了问题：合入前各仓 main 上还是旧产物）；
     #   非 PR 事件（push / 定时 / 手动）→ 口径由 input `changelog-scope` 决定：
-    #       matrix（默认＝旧口径）→ 全矩阵（**周期性全量审计兜底**，不可省，否则是漏检）；
-    #       repo → **只校验调用方本仓**（issue matrix-tools#76：跨仓欠账不该让无关仓
-    #             的 main 背红；跨仓硬失败的归属地是 matrix-tools 的**每日定时 job**）。
+    #       matrix（旧口径）→ 全矩阵（**周期性全量审计兜底**，不可省，否则是漏检）；
+    #       repo（**当前默认**）→ **只校验调用方本仓**（issue matrix-tools#76：跨仓欠账
+    #             不该让无关仓的 main 背红；跨仓硬失败的归属地是 matrix-tools 的
+    #             **每日定时 job**）。
     #
     # ⚠️ `repo` 口径下 **schedule 事件仍是全矩阵**——那是周期性全量审计，
     # 把它一起收窄＝跨仓欠账再也没人抓（静默失效，而门禁照样全绿）。
     # ⚠️ 本仓是**全 org 单点**（各仓以 `@main` 引用，没有回退选项）：所以口径是
-    # **input + 默认值**而不是直接改行为——默认保持 `matrix`（＝旧行为），
-    # 真正换口径要调用层显式传参，并**先在单个仓试点**。
+    # **input + 默认值**而不是直接改行为——换默认之前先在**单个仓试点**
+    # （obs#23 试点实测：main 分支 run 日志 = 「范围模式 repo → 只校验调用方本仓
+    # （obs）」，徽章 success）。
+    # 回退方式：把本 input 的默认改回 'matrix'，或单仓显式传 'matrix'。
     #
     # 本 job 跑在**调用方仓**（模块仓）里，所以 GITHUB_REPOSITORY 就是被改的仓
     # ⇒ PR 触及的仓 = 本仓 ⇒ 改 agent 的 PR 只被 agent 的 CHANGELOG 欠账挡住。
