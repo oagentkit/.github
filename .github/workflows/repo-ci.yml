@@ -68,6 +68,13 @@ jobs:
           done < <(find scripts -name '*.sh' | sort)
           exit "$fail"
 
+      - name: 看板读的取数失败自测（离线）
+        # 看板读会**间歇性**返回被截断/空的结果（issue .github#22）⇒
+        # 「读到空」不能当成「板上就是空的」。这条自测用**假 gh** 确定性地
+        # 复刻那几种读坏掉的形态，断言脚本报的是「取数失败」而不是「缺 N 条」。
+        # 纯离线：不联网、不需要 token ⇒ 可以在任何 CI 里跑。
+        run: python3 scripts/sync-projects.py --selftest-board
+
       - name: 脚本 --help 冒烟
         run: |
           set -euo pipefail

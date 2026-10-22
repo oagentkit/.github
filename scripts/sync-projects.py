@@ -31,11 +31,13 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -243,87 +245,194 @@ def load_manifest() -> tuple[list[str], list[str], str]:
 # ---------------------------------------------------------------------------
 
 
-def load_project(number: int) -> dict:
-    """拉全项目字段与条目（items 游标分页，避免 first:100 静默截断）。"""
+# ---------------------------------------------------------------------------
+# 看板读：可信度判据 + 重读（issue .github#22）
+# ---------------------------------------------------------------------------
+#
+# 为什么需要：
+#
+# GitHub 的 GraphQL `projectV2.items` **会间歇性返回被截断的结果**——实测（2026-10-22）
+# 同一个看板连读 6 次得到 479 / 100 / 400 / 400 / 200 / 100 项，而 `totalCount`
+# **每次都是 479**；另一次读连 `totalCount` 本身都是 0。截断时 `hasNextPage`
+# 会**提前变 false** ⇒ 光看 `hasNextPage` 察觉不到。
+#
+# ⇒ **读到空 / 读到少 ≠ 板上真的空 / 真的少**。
+#
+# 这个区别在这里是致命的，因为 `load_project()` 的读结果会被**两个**地方用：
+#   ① 初始读（算 `by_url`，决定「哪些要入板、哪些要改字段」）；
+#   ② 同步后的审计（算「板上缺哪些」）。
+# 读被截断时：
+#   ① 把**已经在板上的条目当成不存在** ⇒ 脚本去重复入板 ⇒ `add_url` 失败
+#      ⇒ 同步链在**入板阶段**就炸（实测 2026-10-22 13:56Z 那次红就死在入板阶段，
+#      不是死在审计）；
+#   ② 把「没读到」当成「板上没有」⇒ 报「缺 N 条」——**假红**，
+#      而真正的失败信号被淹没在里面。
+#
+# 所以：**读不全就重读；重读仍不全 ⇒ 显式报「取数失败」并中止**，
+# 绝不把「读不可信」当成「事实如此」继续跑（判不了 ≠ 没问题）。
+BOARD_READ_ATTEMPTS = 3
+BOARD_READ_BACKOFF = 1.5
+# 单页请求的重试：截断是**每请求**的（同一个 cursor 连打 10 次，8 次正常、
+# 2 次退化成「0 条 + hasNextPage=false + totalCount=0」）⇒ 重试**同一个请求**
+# 就能救回来，不必把整轮读推倒重来。
+BOARD_PAGE_ATTEMPTS = 4
+BOARD_PAGE_BACKOFF = 0.4
+
+
+def _expected_total(total_counts: list[int | None]) -> int | None:
+    """这一轮读到的**可信总数** → 首个非零的 totalCount（一个都没有则 None）。
+
+    为什么取「首个非零」而不是「第一页那份」：
+    - issue .github#22 建议 3：翻页途中某页读空时，它的 `totalCount=0`
+      会覆盖真实总数 ⇒ 总数只认第一页那份。取「首个非零」同样挡住这种情况；
+    - 实测还存在**第一页自己读空**（items 与 totalCount 同时为 0）⇒
+      只认第一页会在这种读上永久失败。取「首个非零」能恢复。
+    """
+    for t in total_counts:
+        if isinstance(t, int) and t > 0:
+            return t
+    return None
+
+
+BOARD_ITEMS_QUERY = """
+query($org: String!, $number: Int!, $cursor: String) {
+  organization(login: $org) {
+    projectV2(number: $number) {
+      id
+      title
+      fields(first: 50) {
+        nodes {
+          ... on ProjectV2Field { id name }
+          ... on ProjectV2SingleSelectField {
+            id name
+            options { id name color description }
+          }
+        }
+      }
+      items(first: 100, after: $cursor) {
+        totalCount
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          type
+          content {
+            ... on Issue { number url state title
+                           repository { nameWithOwner } }
+            ... on PullRequest { number url state title
+                                 repository { nameWithOwner } }
+            ... on DraftIssue { title body }
+          }
+          fieldValues(first: 50) {
+            nodes {
+              ... on ProjectV2ItemFieldSingleSelectValue {
+                name
+                field {
+                  ... on ProjectV2Field { id name }
+                  ... on ProjectV2SingleSelectField { id name }
+                }
+              }
+              ... on ProjectV2ItemFieldTextValue {
+                text
+                field {
+                  ... on ProjectV2Field { id name }
+                  ... on ProjectV2SingleSelectField { id name }
+                }
+              }
+              ... on ProjectV2ItemFieldNumberValue {
+                number
+                field {
+                  ... on ProjectV2Field { id name }
+                  ... on ProjectV2SingleSelectField { id name }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def _fetch_page(vars_: dict, *, collected: int = 0,
+                known_total: int | None = None) -> dict:
+    """取**一页**看板；对**退化页**重试同一个请求。
+
+    「退化页」= `nodes` 为空 **且** `totalCount` 读不到非零值
+    ——服务端在这一请求上把整页返回成了空（实测同一个 cursor 连打 10 次，
+    8 次正常、2 次退化成「0 条 + hasNextPage=false + totalCount=0」）。
+
+    ⚠️ 为什么必须**逐页**重试而不是「整轮读重推」：截断是**每请求**发生的，
+    同一个请求重打一次就能拿到完整页；把整轮读推倒重来会把前面几页也白读，
+    且在慢网络下更慢（实测 CI 里整轮重试 4 次全灭）。
+
+    重试仍不成功 ⇒ 原样返回最后一次的响应，由外层 `_board_read_verdict()`
+    判它不可信（**不**在这里下结论）。
+    """
+    last_proj = None
+    for attempt in range(1, BOARD_PAGE_ATTEMPTS + 1):
+        data = gql(BOARD_ITEMS_QUERY, **vars_)
+        proj = data["organization"].get("projectV2")
+        if proj is None:
+            raise SyncError(
+                f"看板读不到：org {ORG} 下不存在 Project #{vars_.get('number')}"
+                "（或 token 无 project 读权限）。"
+            )
+        last_proj = proj
+        page = proj["items"]
+        nodes = page.get("nodes") or []
+        tc = page.get("totalCount")
+        total_seen = tc if (isinstance(tc, int) and tc > 0) else known_total
+        info = page.get("pageInfo") or {}
+        # 退化页：既没有条目、又读不到非零的 totalCount
+        degenerate = not nodes and total_seen is None
+        # 短页：有条目、但 hasNextPage=false 且**总数对不上**
+        #（服务端提前收尾：实测会在翻页途中把一页返回成空并置 hasNextPage=false）
+        short = (
+            not info.get("hasNextPage")
+            and total_seen is not None
+            and collected + len(nodes) < total_seen
+        )
+        if not degenerate and not short:
+            return proj                      # 这一页可信 ⇒ 用它
+        if attempt < BOARD_PAGE_ATTEMPTS:
+            wait = BOARD_PAGE_BACKOFF * attempt
+            why = "读空（退化页）" if degenerate else "提前收尾（短页）"
+            print(f"  · 看板这一页{why}，{wait}s 后重打同一个请求"
+                  f"（{attempt}/{BOARD_PAGE_ATTEMPTS}）")
+            time.sleep(wait)
+    return last_proj
+
+
+def _load_project_once(number: int) -> dict:
+    """读**一轮**看板 → 原始读数。
+
+    **只取数，不判可信度**——判定在 `_board_read_verdict()`。
+    取数与判定分开，是为了「读到了」和「读全了」不混为一谈。
+    """
     fields: dict[str, dict] = {}
     items: list[dict] = []
+    page_counts: list[int] = []         # 每一页读到的 node 数
+    total_counts: list[int | None] = []  # 每一页读到的 totalCount（原样保留 0）
     pid = None
+    title = None
     cursor: str | None = None
     while True:
         vars_ = {"org": ORG, "number": str(number)}
         if cursor:
             vars_["cursor"] = cursor
-        data = gql(
-            """
-            query($org: String!, $number: Int!, $cursor: String) {
-              organization(login: $org) {
-                projectV2(number: $number) {
-                  id
-                  title
-                  fields(first: 50) {
-                    nodes {
-                      ... on ProjectV2Field { id name }
-                      ... on ProjectV2SingleSelectField {
-                        id name
-                        options { id name color description }
-                      }
-                    }
-                  }
-                  items(first: 100, after: $cursor) {
-                    pageInfo { hasNextPage endCursor }
-                    nodes {
-                      id
-                      type
-                      content {
-                        ... on Issue { number url state title
-                                       repository { nameWithOwner } }
-                        ... on PullRequest { number url state title
-                                             repository { nameWithOwner } }
-                        ... on DraftIssue { title body }
-                      }
-                      fieldValues(first: 50) {
-                        nodes {
-                          ... on ProjectV2ItemFieldSingleSelectValue {
-                            name
-                            field {
-                              ... on ProjectV2Field { id name }
-                              ... on ProjectV2SingleSelectField { id name }
-                            }
-                          }
-                          ... on ProjectV2ItemFieldTextValue {
-                            text
-                            field {
-                              ... on ProjectV2Field { id name }
-                              ... on ProjectV2SingleSelectField { id name }
-                            }
-                          }
-                          ... on ProjectV2ItemFieldNumberValue {
-                            number
-                            field {
-                              ... on ProjectV2Field { id name }
-                              ... on ProjectV2SingleSelectField { id name }
-                            }
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-            """,
-            **vars_,
-        )
-        proj = data["organization"].get("projectV2")
-        if proj is None:
-            raise SyncError(
-                f"看板读不到：org {ORG} 下不存在 Project #{number}"
-                "（或 token 无 project 读权限）。"
-            )
+        proj = _fetch_page(vars_, collected=len(items),
+                           known_total=_expected_total(total_counts))
         pid = proj["id"]
+        title = proj.get("title")
         for f in proj["fields"]["nodes"]:
             fields[f["name"]] = f
-        for n in proj["items"]["nodes"]:
+        page = proj["items"]
+        page_counts.append(len(page.get("nodes") or []))
+        tc = page.get("totalCount")
+        total_counts.append(tc if isinstance(tc, int) else None)
+        for n in page.get("nodes") or []:
             content = n.get("content") or {}
             fv = {}
             for x in n.get("fieldValues", {}).get("nodes", []):
@@ -348,13 +457,92 @@ def load_project(number: int) -> dict:
                     "fv": fv,
                 }
             )
-        page = proj["items"]["pageInfo"]
-        if not page.get("hasNextPage"):
+        info = page.get("pageInfo") or {}
+        if not info.get("hasNextPage"):
             break
-        cursor = page.get("endCursor")
+        cursor = info.get("endCursor")
         if not cursor:
             break
-    return {"id": pid, "number": number, "title": proj.get("title"), "fields": fields, "items": items}
+    return {
+        "id": pid,
+        "number": number,
+        "title": title,
+        "fields": fields,
+        "items": items,
+        "page_counts": page_counts,
+        "total_counts": total_counts,
+        "total_count": _expected_total(total_counts),
+    }
+
+
+def _board_read_verdict(proj: dict) -> tuple[bool, str]:
+    """这一轮看板读**可信不可信** → (可信, 理由)。
+
+    三条都要满足：
+    1. `totalCount` 至少读到一次**非零**值——读到 0 ⇒ 这次读不可信
+       （实测存在 items 与 totalCount **同时为 0** 的读：那种读里
+       `0 == 0` 会「通过」任何等值校验 ⇒ 绝不能当成读全了）；
+    2. 所有**非零**的 `totalCount` 必须**相等**——不等 ⇒ 服务端返回不自洽；
+    3. 读到的条数必须**等于** `totalCount`——少了就是被截断。
+    """
+    totals = [t for t in (proj.get("total_counts") or []) if isinstance(t, int) and t > 0]
+    if not totals:
+        return False, (
+            "totalCount 一次都没读到非零值"
+            "（实测存在 items 与 totalCount 同时为 0 的读——那是读空，不是板上是空的）"
+        )
+    expected = totals[0]
+    if any(t != expected for t in totals):
+        return False, f"各页读到的 totalCount 不一致：{totals}（服务端返回不自洽）"
+    got = len(proj.get("items") or [])
+    if got != expected:
+        return False, (
+            f"读到的条数 {got} ≠ totalCount {expected}"
+            f"（读被截断；逐页读到 {proj.get('page_counts')}）"
+        )
+    return True, f"读到 {got} 项，与 totalCount 一致"
+
+
+def _audit_split(missing: list[str], added_urls: list[str]) -> tuple[list[str], list[str]]:
+    """审计判定 → (真的缺, 刚入板但看板索引还没同步的)。
+
+    「刚入板」的那部分**不算缺**：mutation 返回了 item id ⇒ 条目确实在板上，
+    只是看板的 items 连接是最终一致的、读里还看不到（见上面「审计」一节）。
+    分开列出来是为了**显式记账**——不是静默放过。
+    """
+    just_added = set(added_urls)
+    pending = sorted(set(missing) & just_added)
+    return [u for u in missing if u not in just_added], pending
+
+
+def load_project(number: int, *, attempts: int = BOARD_READ_ATTEMPTS) -> dict:
+    """读看板 —— **读不全就重读；重读仍不全 ⇒ 显式报「取数失败」**。
+
+    读的结果**只有可信时才交出去**：
+    不可信的读绝不会被当成「板上就是空的 / 板上没有这些」——
+    那会让审计报出「缺 N 条」的**假红**，也会让入板阶段去重复入板
+    （把已经在板上的条目当成不存在）。
+
+    取数失败时抛 SyncError，**中止**本次同步——「不许静默通过」这条纪律
+    在这里指的是「不许把读不到当成事实」，而不是「读不到也要往下跑」。
+    """
+    reasons: list[str] = []
+    for attempt in range(1, attempts + 1):
+        proj = _load_project_once(number)
+        ok, why = _board_read_verdict(proj)
+        if ok:
+            return proj
+        reasons.append(f"第 {attempt}/{attempts} 轮：{why}")
+        if attempt < attempts:
+            wait = BOARD_READ_BACKOFF * attempt
+            print(f"  · 第 {attempt}/{attempts} 轮读不可信（{why}），{wait}s 后重读")
+            time.sleep(wait)
+    raise SyncError(
+        "看板取数失败（读到空 / 读到少 ≠ 板上真的空 / 真的少）：\n    "
+        + "\n    ".join(reasons)
+        + "\n  这是**取数问题**，不是「板上有而没读到」——本次**中止**，"
+          "不同步、不审计（否则会把读空当成板上没有，报出假红）。"
+    )
 
 
 def set_field(pid: str, item_id: str, field_id: str, *, option_id: str | None = None, text: str | None = None) -> None:
@@ -428,8 +616,12 @@ def resolve_node_ids(urls: list[str], *, chunk: int = 20) -> list[str | None]:
             msgs = "; ".join(str(e.get("message", e)) for e in data["errors"])
             raise SyncError(f"批量取 node_id GraphQL 报错：{msgs}")
         payload = data.get("data") or {}
-        for i in range(len(group)):
-            node = (payload.get(f"r{i}") or {}).get("id")
+        for i, (_o, _n, _num, f) in enumerate(group):
+            # ⚠️ id 在 alias 下的 issue/pullRequest 里（`r0: repository { issue { id } }`
+            # → data.r0 = {"issue": {"id": ...}}），**不在 alias 直属**。
+            # 旧写法 `(payload.get(f"r{i}") or {}).get("id")` 恒为 None
+            # ⇒ 批量入板整批静默空转（只靠逐条 add_url 兜底，批量形同虚设）。
+            node = ((payload.get(f"r{i}") or {}).get(f) or {}).get("id")
             out.append(node)
     return out
 
@@ -810,6 +1002,7 @@ def sync_board(apply: bool) -> int:
 
     # ---- 落盘：入板与字段写都走批量（GraphQL 别名批查），单条失败退化为逐个重试 ----
     pending: list[tuple[str, str, str | None, str | None]] = []
+    added_urls: list[str] = []          # 本次**入板成功**的条目（审计时用）
     if adds:
         iids = add_urls_batched(proj["id"], [a["url"] for a in adds])
         for a, iid in zip(adds, iids):
@@ -823,6 +1016,7 @@ def sync_board(apply: bool) -> int:
                     if not hit:
                         raise
                     iid = hit["id"]
+            added_urls.append(a["url"])
             pending.append((iid, a["want_status"], a["want_kind"], a["want_mod"]))
     for s in syncs:
         pending.append((s["id"], s["status"], s["kind"], s["mod"]))
@@ -845,10 +1039,34 @@ def sync_board(apply: bool) -> int:
         set_field(proj["id"], iid, fid, option_id=oid)
 
     # ---- 同步后审计：每条采集到的条目都必须在板上 ----
+    #
+    # 这里有**两条**「读不到 ≠ 没有」，都必须处理（issue .github#22）：
+    # ① 看板的 items 连接**间歇性**返回被截断/空的结果
+    #    ⇒ `load_project()` 已做「校验 + 重读」，仍不可信就报取数失败；
+    # ② 看板的 items 连接是**最终一致**的 ⇒ **刚入板**的条目在读里可能还看不到
+    #    （实测：入板后 GraphQL 读里查不到，`totalCount` 也还是旧值）——
+    #    这一条由**入板结果**裁决：mutation 返回了 item id ⇒ 条目确实在板上。
+    #
+    # ⇒ 顺序：先读一次；「读里没有」就**再读一次**排除①；仍没有的，
+    #   再排除②（本次刚入板的）；剩下的才是**真的缺**。
     after = load_project(PROJECT)
-    board_urls = {i["url"] for i in after["items"] if i["url"]}
+    board_urls = {x["url"] for x in after["items"] if x["url"]}
     missing = [i["url"] for i in items if i["url"] not in board_urls]
-    print(f"  审计：板上 {len(after['items'])} 项 / 采集 {len(items)} 条 → 缺 {len(missing)} 条")
+    if missing:
+        # 再读一次：排除「读被截断」
+        time.sleep(BOARD_READ_BACKOFF)
+        after = load_project(PROJECT)
+        board_urls = {x["url"] for x in after["items"] if x["url"]}
+        missing = [i["url"] for i in items if i["url"] not in board_urls]
+
+    missing, pending_idx = _audit_split(missing, added_urls)
+    print(
+        f"  审计：板上 {len(after['items'])} 项"
+        f"（totalCount {after.get('total_count')}，已对账）"
+        f" / 采集 {len(items)} 条 → 缺 {len(missing)} 条"
+        + (f"（另 {len(pending_idx)} 条本次刚入板，看板索引尚未同步，以入板结果为准）"
+           if pending_idx else "")
+    )
 
     problems: list[str] = []
     if missing:
@@ -1007,6 +1225,280 @@ def refresh_module(mod: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# 看板读的离线自测（issue .github#22）
+# ---------------------------------------------------------------------------
+#
+# 为什么用**假 gh**而不是「等线上真的读空」：
+# 线上读空是**间歇性**的（实测 6 次读里 4 次被截断），等它出现要碰运气，
+# 而且它出现时 workflow 已经红了 —— 那样验证不了「脚本在该报取数失败的时候
+# 确实报取数失败」。假 gh 能**确定性地**复刻每一种读坏掉的形态。
+#
+# 复刻的四种形态（都是实测见过的）：
+#   ① 正常读：条数与 totalCount 一致；
+#   ② 首次读空、第二次正常 ⇒ 应当**重读后采信**；
+#   ③ 持续读空 ⇒ 应当报「取数失败」，**不是**「缺 N 条」；
+#   ④ 截断读（条数 < totalCount）⇒ 同样报「取数失败」；
+#   ⑤ 条数与 totalCount **同时为 0** ⇒ `0 == 0` 会「通过」任何等值校验
+#      ⇒ 绝不能当成读全了（这一条是最容易被漏掉的那条）。
+# 外加**反证样本**：把可信度判据短路成「永远可信」⇒ 上面 ③④⑤ 必须不再报错
+# ⇒ 证明这些用例对「判据失效」有鉴别力，而不是「跑通即绿」的摆设。
+
+FAKE_GH_SOURCE = r'''#!/usr/bin/env python3
+"""假 gh：按**计划**依次返回 GraphQL 响应（复刻服务端间歇性读空 / 截断）。
+
+计划文件是一个 JSON 数组：第 k 次调用返回第 k 项（超出则用最后一项）。
+"""
+import json
+import os
+import sys
+
+plan = json.loads(open(os.environ["FAKE_GH_PLAN"], encoding="utf-8").read())
+counter = os.environ["FAKE_GH_COUNTER"]
+try:
+    seen = int(open(counter, encoding="utf-8").read())
+except Exception:
+    seen = 0
+with open(counter, "w", encoding="utf-8") as fh:
+    fh.write(str(seen + 1))
+sys.stdout.write(json.dumps(plan[min(seen, len(plan) - 1)]))
+'''
+
+
+def _fake_board_response(nodes: int, total: int, *,
+                         has_next: bool = False, end_cursor: str | None = None) -> dict:
+    """造一份 **GraphQL 看板读**的响应（形状与真实 API 一致）。
+
+    真实响应里 `totalCount` 是看板总条数，`nodes` 是**这一页**读到的条目。
+    实测服务端会返回**比 totalCount 少**的 nodes（被截断），这里能复刻那种形态。
+    """
+    items = []
+    for i in range(nodes):
+        num = 1000 + i
+        items.append({
+            "id": f"PVTI_{num}",
+            "type": "ISSUE",
+            "content": {
+                "number": num,
+                "url": f"https://github.com/oagentkit/llm/issues/{num}",
+                "state": "CLOSED",
+                "title": f"样本 issue {num}",
+                "repository": {"nameWithOwner": "oagentkit/llm"},
+            },
+            "fieldValues": {"nodes": [
+                {"name": "Done", "field": {"id": "F_status", "name": "Status"}},
+            ]},
+        })
+    return {"data": {"organization": {"projectV2": {
+        "id": "PVT_fake",
+        "title": "oagentkit Issue 大盘",
+        "fields": {"nodes": [
+            {"id": "F_status", "name": "Status", "options": [
+                {"id": "O_todo", "name": "Todo", "color": "GRAY", "description": ""},
+                {"id": "O_done", "name": "Done", "color": "GREEN", "description": ""},
+                {"id": "O_wip", "name": "In Progress", "color": "BLUE", "description": ""},
+            ]},
+        ]},
+        "items": {
+            "totalCount": total,
+            "pageInfo": {"hasNextPage": has_next, "endCursor": end_cursor},
+            "nodes": items,
+        },
+    }}}}
+
+
+def _fake_degenerate_page() -> dict:
+    """造一份**退化页**响应：0 条 + totalCount=0 + hasNextPage=false。
+
+    这就是实测里服务端偶发返回的那种页（同一个 cursor 连打 10 次，2 次退化成这样）。
+    """
+    return {"data": {"organization": {"projectV2": {
+        "id": "PVT_fake",
+        "title": "oagentkit Issue 大盘",
+        "fields": {"nodes": [
+            {"id": "F_status", "name": "Status", "options": [
+                {"id": "O_todo", "name": "Todo", "color": "GRAY", "description": ""},
+                {"id": "O_done", "name": "Done", "color": "GREEN", "description": ""},
+                {"id": "O_wip", "name": "In Progress", "color": "BLUE", "description": ""},
+            ]},
+        ]},
+        "items": {
+            "totalCount": 0,
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+            "nodes": [],
+        },
+    }}}}
+
+
+@contextlib.contextmanager
+def _fake_gh(plan: list[dict]):
+    """把 PATH 前置一个假 gh，让它按 plan 返回 GraphQL 响应。"""
+    with tempfile.TemporaryDirectory(prefix="fake-gh-") as tmp:
+        d = Path(tmp)
+        script = d / "gh"
+        script.write_text(FAKE_GH_SOURCE, encoding="utf-8")
+        script.chmod(0o755)
+        plan_file = d / "plan.json"
+        plan_file.write_text(json.dumps(plan), encoding="utf-8")
+        counter = d / "counter"
+        counter.write_text("0", encoding="utf-8")
+        saved = {k: os.environ.get(k) for k in ("PATH", "FAKE_GH_PLAN", "FAKE_GH_COUNTER")}
+        os.environ["PATH"] = f"{d}{os.pathsep}{saved['PATH'] or ''}"
+        os.environ["FAKE_GH_PLAN"] = str(plan_file)
+        os.environ["FAKE_GH_COUNTER"] = str(counter)
+        try:
+            yield
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+
+def selftest_board_read() -> int:
+    """看板读的取数失败自测（离线；issue .github#22）。"""
+    print("=== selftest：看板读的取数失败（issue .github#22）===")
+    fails: list[str] = []
+
+    def check(name: str, got, want) -> None:
+        if got != want:
+            fails.append(f"{name}: 期望 {want!r}，实得 {got!r}")
+
+    def expect_ok(name: str, plan: list[dict]):
+        """跑一次 load_project，期望它**成功**；失败要记成断言失败，
+        而不是让异常把整个自测带崩（崩在异常上 = 用例没跑到断言）。"""
+        try:
+            with _fake_gh(plan):
+                return load_project(1)
+        except SyncError as e:
+            fails.append(f"{name}: 期望成功返回，实得 SyncError：{str(e)[:160]}")
+            return None
+
+    def expect_sync_error(name: str, plan: list[dict]) -> str:
+        """跑一次 load_project，期望它抛 SyncError；返回错误信息。"""
+        try:
+            with _fake_gh(plan):
+                load_project(1)
+        except SyncError as e:
+            return str(e)
+        fails.append(f"{name}: 期望抛 SyncError，实际没抛")
+        return ""
+
+    saved_backoff = globals()["BOARD_READ_BACKOFF"]
+    globals()["BOARD_READ_BACKOFF"] = 0.0
+    try:
+        # ---- 1) 正常读：条数与 totalCount 一致 ⇒ 采信
+        proj = expect_ok("正常读", [_fake_board_response(3, 3)])
+        if proj is not None:
+            check("正常读采信（条数）", len(proj["items"]), 3)
+            check("正常读记录 totalCount", proj.get("total_count"), 3)
+
+        # ---- 2) 首次读空、第二次正常 ⇒ 重读后采信（不是「板上就是空的」）
+        proj = expect_ok("读空后重读",
+                         [_fake_board_response(0, 3), _fake_board_response(3, 3)])
+        if proj is not None:
+            check("读空后重读采信（条数）", len(proj["items"]), 3)
+
+        # ---- 3) 持续读空 ⇒ 报「取数失败」，**不是**「缺 N 条」
+        msg = expect_sync_error("持续读空", [_fake_board_response(0, 3)])
+        check("持续读空报取数失败", "取数失败" in msg, True)
+        check("持续读空不报『→ 缺 N 条』", "→ 缺" in msg, False)
+
+        # ---- 4) 截断读（条数 < totalCount）⇒ 同样报「取数失败」
+        msg = expect_sync_error("截断读", [_fake_board_response(1, 3)])
+        check("截断读报取数失败", "取数失败" in msg, True)
+        check("截断读不报『→ 缺 N 条』", "→ 缺" in msg, False)
+
+        # ---- 5) 条数与 totalCount 同时为 0 ⇒ 0 == 0 **不算读全了**
+        msg = expect_sync_error("条数与总数同时为 0", [_fake_board_response(0, 0)])
+        check("0==0 报取数失败", "取数失败" in msg, True)
+        check("0==0 不报『→ 缺 N 条』", "→ 缺" in msg, False)
+
+        # ---- 6) 各页 totalCount 不自洽 ⇒ 报「取数失败」
+        msg = expect_sync_error(
+            "各页 totalCount 不一致",
+            [_fake_board_response(3, 3, has_next=True, end_cursor="cur1"),
+             _fake_board_response(3, 5, has_next=False)],
+        )
+        check("各页 totalCount 不一致报取数失败", "取数失败" in msg, True)
+        check("报出的是「不自洽」这个原因", "totalCount 不一致" in msg, True)
+
+        # ---- 6a) 逐页重试：首���是**退化页** ⇒ 重打同一个请求就能救回来
+        #           （实测截断是**每请求**的：同一 cursor 连打 10 次，8 次正常）
+        proj = expect_ok("退化页重打",
+                         [_fake_degenerate_page(), _fake_board_response(3, 3)])
+        if proj is not None:
+            check("退化页重打后采信（条数）", len(proj["items"]), 3)
+            check("退化页重打后采信（totalCount）", proj.get("total_count"), 3)
+
+        # ---- 6a-2) 逐页重试：**短页**（有条目但提前收尾）⇒ 重打同一个请求
+        short_plan = [
+            _fake_board_response(2, 4, has_next=True, end_cursor="cur1"),
+            _fake_board_response(1, 0, has_next=False),        # 短页：1+2=3 < 4
+            _fake_board_response(2, 4, has_next=False),        # 重打：2+2=4 ✓
+        ]
+        proj = expect_ok("短页重打", short_plan)
+        if proj is not None:
+            check("短页重打后采信（条数）", len(proj["items"]), 4)
+
+        # ---- 6a-3) 每页都退化 ⇒ 仍然报「取数失败」（不把读空当板上是空的）
+        msg = expect_sync_error("每页都退化", [_fake_degenerate_page()])
+        check("每页都退化报取数失败", "取数失败" in msg, True)
+        check("每页都退化不报『→ 缺 N 条』", "→ 缺" in msg, False)
+
+        # ---- 6b) 审计判定：刚入板的条目**不算缺**（看板索引还没同步），
+        #           真的缺的必须留在「缺」里
+        missing, pending_idx = _audit_split(
+            ["https://github.com/oagentkit/llm/issues/1",
+             "https://github.com/oagentkit/llm/issues/2"],
+            ["https://github.com/oagentkit/llm/issues/2"],
+        )
+        check("刚入板的不算缺", missing, ["https://github.com/oagentkit/llm/issues/1"])
+        check("刚入板的单独记账", pending_idx, ["https://github.com/oagentkit/llm/issues/2"])
+
+        # ---- 6c) resolve_node_ids：id 在 alias 下的 issue/pullRequest 里
+        #           （旧写法恒为 None ⇒ 批量入板整批静默空转）
+        with _fake_gh([{"data": {"r0": {"issue": {"id": "I_fake"}}}}]):
+            got = resolve_node_ids(["https://github.com/oagentkit/llm/issues/1"])
+        check("resolve_node_ids 取到嵌套的 id", got, ["I_fake"])
+        with _fake_gh([{"data": {"r0": {"pullRequest": {"id": "PR_fake"}}}}]):
+            got = resolve_node_ids(["https://github.com/oagentkit/llm/pull/1"])
+        check("resolve_node_ids 取到 PR 的 id", got, ["PR_fake"])
+
+        # ---- 7) 反证样本：把可信度判据短路成「永远可信」⇒ ③④⑤ 必须不再报错
+        #         （否则这些用例对「判据失效」没有鉴别力）
+        orig_verdict = globals()["_board_read_verdict"]
+        try:
+            globals()["_board_read_verdict"] = lambda proj: (True, "短路：永远可信")
+            for label, plan in (
+                ("③持续读空", [_fake_board_response(0, 3)]),
+                ("④截断读", [_fake_board_response(1, 3)]),
+                ("⑤0==0", [_fake_board_response(0, 0)]),
+            ):
+                try:
+                    with _fake_gh(plan):
+                        load_project(1)
+                except SyncError:
+                    fails.append(
+                        f"反证：判据短路后「{label}」仍报错 ⇒ 用例对判据失效没有鉴别力"
+                    )
+        finally:
+            globals()["_board_read_verdict"] = orig_verdict
+    finally:
+        globals()["BOARD_READ_BACKOFF"] = saved_backoff
+
+    if fails:
+        print("❌ 看板读自测失败：")
+        for f in fails:
+            print(f"   - {f}")
+        return 1
+    print("✅ 看板读自测通过"
+          "（正常读采信 / 读空后重读 / 持续读空报取数失败 / 截断读被拒 / "
+          "0==0 不算读全 / 各页总数不自洽被拒 / 反证样本有鉴别力）")
+    return 0
+
+
 def selftest() -> int:
     """自测：强制走 **API 路径** 取模块清单，并验证它是可解析的 JSON。
 
@@ -1048,7 +1540,9 @@ def selftest() -> int:
         return 1
     n_mod = sum(1 for m in mods if isinstance(m, dict) and m.get("repo"))
     print(f"✅ API 路径可用：modules {n_mod} 个 + infraRepos {len(infra)} 个")
-    return 0
+
+    # ---- 看板读的取数失败自测（离线，不依赖网络）----
+    return selftest_board_read()
 
 
 def main() -> int:
@@ -1059,11 +1553,15 @@ def main() -> int:
     ap.add_argument("--refresh-module", metavar="NAME", help="事件驱动：刷新单仓的板面字段")
     ap.add_argument("--selftest", action="store_true",
                     help="自测：强制走 API 路径取模块清单（CI 必须跑）")
+    ap.add_argument("--selftest-board", action="store_true",
+                    help="自测：看板读的取数失败（离线，不联网、不需要 token）")
     args = ap.parse_args()
 
     try:
         if args.selftest:
             return selftest()
+        if args.selftest_board:
+            return selftest_board_read()
         if args.link:
             link_item(args.link, args.state)
             print("\nOK")
