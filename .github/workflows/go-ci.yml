@@ -58,10 +58,10 @@ on:
         type: string
         default: 'repo'
       receipts-enabled:
-        description: '是否在本仓跑 issue 回执门禁（被机器自动关闭的 issue 必须留下带锚点的回执）。默认关：试点后翻默认；关着时 job 跑但跳过判定步骤，不产生任何结论'
+        description: '是否在本仓跑 issue 回执门禁（被机器自动关闭的 issue 必须留下带锚点的回执）。默认开：每个仓自己 issue 的回执由它自己负责；关着时 job 跑但跳过判定步骤，不产生任何结论'
         required: false
         type: boolean
-        default: false
+        default: true
       receipts-scope:
         description: '回执门禁在**非 PR 事件**（push / 定时 / 手动）下的范围口径：matrix = 全矩阵；repo = 只判调用方本仓（各仓自己 issue 的回执由它自己负责；跨仓全量审计由 matrix-tools 的每日定时 job 承担）'
         required: false
