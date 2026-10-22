@@ -97,11 +97,21 @@ CONTRIBUTING.md / SECURITY.md / SUPPORT.md
   且用 **PR head** 的内容校验。
   只裁剪不换 ref 解决不了问题：合入前各仓 main 上还是旧产物。
   所以改 agent 的 PR 只会被 agent 的 CHANGELOG 欠账挡住，不会被无关仓的欠账卡住。
-- **push / schedule / workflow_dispatch**：走**全矩阵**——周期性全量审计兜底，不可省，
-  否则就是漏检（PR 只查被触及的仓，没 PR 的漂移就没人看）。
+- **push / schedule / workflow_dispatch**：口径由 `go-ci.yml` 的 input
+  **`changelog-scope`** 决定（issue matrix-tools#76）：
+  - `matrix`（**默认**＝旧口径）→ 走**全矩阵**——周期性全量审计兜底，不可省，
+    否则就是漏检（PR 只查被触及的仓，没 PR 的漂移就没人看）。
+  - `repo` → **只校验调用方本仓**。理由：跨仓欠账不该让无关仓的 `main` 背红，
+    而背红的那些徽章**永不自愈**（欠账修好后没人重跑那个仓 ⇒ 假红长期挂着，
+    没有任何门禁会报「有 N 个仓的徽章是陈旧的」）。
+  - ⚠️ **`repo` 口径下 schedule 事件仍是全矩阵**——那是周期性全量审计，
+    把它一起收窄＝跨仓欠账再也没人抓（静默失效，而门禁照样全绿）。
+- **跨仓硬失败的归属地**：`matrix-tools` 的**每日定时 job**（`cron: '17 6 * * *'`）
+  与本仓 `repo-ci.yml` 的每日定时 job（`cron: '29 6 * * *'`）。前者守 CHANGELOG
+  覆盖，后者守矩阵漂移 / 门面守卫 / 幽灵包。两边都靠**定时重算**让徽章自愈。
 - 范围判据的**唯一逻辑来源**是 oracle 的 `--print-scope`（它读 GitHub 事件上下文），
   不要在 YAML 里另造一份判定。
-- 本仓 `repo-ci.yml` 在 push 与 PR 上都跑；但 `Matrix docs drift` job 拉的是
+- 本仓 `repo-ci.yml` 在 push、PR 与**每日定时**上都跑；但 `Matrix docs drift` job 拉的是
   matrix-tools 与站点的**默认分支**，所以它反映的是「各仓 main 的现状」，不是当前 PR 的内容。
 
 ## 仓特有纪律

@@ -52,6 +52,11 @@ on:
         required: false
         type: boolean
         default: true
+      changelog-scope:
+        description: 'CHANGELOG 覆盖门禁在**非 PR 事件**（push / 定时 / 手动）下的范围口径：matrix = 全矩阵（旧口径，默认）；repo = 只校验调用方本仓（全矩阵审计由 matrix-tools 的每日定时 job 承担）'
+        required: false
+        type: string
+        default: 'matrix'
 
 # 同一 ref 的重复触发取消旧 run（PR 连推 / main 连推不堆叠分钟数）
 concurrency:
@@ -285,8 +290,16 @@ jobs:
     # 范围按「**谁造成漂移谁负责**」裁剪（issue #41 裁决 2）：
     #   PR 事件 → 只校验**本 PR 触及的仓**（= PR 的 base 仓），且用 **PR head** 的
     #             内容校验（只裁剪不换 ref 解决不了问题：合入前各仓 main 上还是旧产物）；
-    #   非 PR 事件（push / 定时 / 手动）→ 全矩阵（**周期性全量审计兜底**，不可省，
-    #             否则是漏检）。
+    #   非 PR 事件（push / 定时 / 手动）→ 口径由 input `changelog-scope` 决定：
+    #       matrix（默认＝旧口径）→ 全矩阵（**周期性全量审计兜底**，不可省，否则是漏检）；
+    #       repo → **只校验调用方本仓**（issue matrix-tools#76：跨仓欠账不该让无关仓
+    #             的 main 背红；跨仓硬失败的归属地是 matrix-tools 的**每日定时 job**）。
+    #
+    # ⚠️ `repo` 口径下 **schedule 事件仍是全矩阵**——那是周期性全量审计，
+    # 把它一起收窄＝跨仓欠账再也没人抓（静默失效，而门禁照样全绿）。
+    # ⚠️ 本仓是**全 org 单点**（各仓以 `@main` 引用，没有回退选项）：所以口径是
+    # **input + 默认值**而不是直接改行为——默认保持 `matrix`（＝旧行为），
+    # 真正换口径要调用层显式传参，并**先在单个仓试点**。
     #
     # 本 job 跑在**调用方仓**（模块仓）里，所以 GITHUB_REPOSITORY 就是被改的仓
     # ⇒ PR 触及的仓 = 本仓 ⇒ 改 agent 的 PR 只被 agent 的 CHANGELOG 欠账挡住。
@@ -310,5 +323,11 @@ jobs:
       - name: CHANGELOG 覆盖（独立 oracle；PR 只查本 PR 触及的仓）
         # 覆盖判据要读**完整历史**（tag 区间 + 每个 commit 的 body），
         # 脚本内部自己完整克隆并 fetch PR head。
-        run: python3 matrix-tools/scripts/verify_changelog_coverage.py --ci --org oagentkit
+        #
+        # 范围判定只此一份（oracle 的 --print-scope / --ci），别在这个 YAML 里
+        # 另造一份判定逻辑。
+        run: >-
+          python3 matrix-tools/scripts/verify_changelog_coverage.py
+          --ci --org oagentkit
+          --scope-mode ${{ inputs.changelog-scope }}
 
