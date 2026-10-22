@@ -99,7 +99,7 @@ CONTRIBUTING.md / SECURITY.md / SUPPORT.md
 
 | 开关 | 默认 | 作用 |
 |---|---|---|
-| `receipts-enabled` | `false` | 是否在本仓跑回执门禁。关着时 job 照常跑（判定步骤跳过），日志里打出「未开启」 |
+| `receipts-enabled` | `true` | 是否在本仓跑回执门禁。关着时 job 照常跑（判定步骤跳过），日志里打出「未开启」 |
 | `receipts-scope` | `repo` | 非 PR 事件的范围口径：`repo` = 只判调用方本仓；`matrix` = 全矩阵 |
 
 - **PR 事件**：范围恒为 **PR 的 base 仓**（= issue 所在仓），与 scope 无关；
@@ -109,7 +109,8 @@ CONTRIBUTING.md / SECURITY.md / SUPPORT.md
 - ⚠️ **开关在步骤级**：登记表的第三腿只认 `github.event_name` 形式的 job 级 `if:`，
   写成 `inputs.receipts-enabled` 会判黄（判不了 ≠ 没问题）；
 - ⚠️ 本仓是**全 org 单点**（各仓以 `@main` 引用，没有回退选项）⇒ 走「input + 默认值」，
-  **先单仓试点再翻默认**；回退方式：把 `receipts-enabled` 默认改回 `false`。
+  **先单仓试点再翻默认**（试点：mcpkit#21，实测 main 分支 run 的范围判定是
+  「只判调用方本仓（mcpkit）」）；回退方式：把 `receipts-enabled` 默认改回 `false`。
 
 ### PR 事件 vs push / schedule 事件
 
