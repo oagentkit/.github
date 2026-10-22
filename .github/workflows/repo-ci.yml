@@ -8,6 +8,18 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+  schedule:
+    # 每日跨仓漂移审计（issue matrix-tools#76）。
+    #
+    # 为什么本仓需要定时跑：本仓的 job 大多是**跨仓**的（矩阵漂移、门面守卫、
+    # 幽灵包、CHANGELOG 覆盖……）——别的仓有欠账 ⇒ 本仓的 run 变红。
+    # 欠账修好后，**本仓若没被再次 push**，「main 最新一次 run」仍是修债前那次
+    # 红的 run ⇒ 徽章**长期挂假红**且没有任何门禁会报它（实测：8 个模块仓的
+    # main 徽章假红挂了约 13 小时）。
+    # 定时跑 = 判据按当前远端状态**重算** ⇒ 徽章每天自愈一次。
+    #
+    # 错开 matrix-tools 的 '17 6 * * *'（那是全矩阵 CHANGELOG 覆盖的硬失败归属地）。
+    - cron: '29 6 * * *'
   workflow_dispatch:
 
 permissions:
@@ -216,6 +228,12 @@ jobs:
         #             否则是漏检）。
         #   改造前每个 PR 都全 org 扫 14 个仓 ⇒ 任一模块欠账堵住所有无关 PR
         #   （实测 oagentkit/.github#15 被卡两天）。
+        #
+        # ⚠️ 本仓是**跨仓审计的归属方**（不是被审计方）：本仓不在「有 CHANGELOG
+        # 要求的仓」清单里 ⇒ PR 事件下范围为空（不校验任何仓），push / 定时事件下
+        # 走全矩阵并**硬失败**——这正是「跨仓欠账唯一的硬失败归属地」在治理仓这一侧
+        # 的落法。模块仓那一侧的口径由 go-ci.yml 的 input `changelog-scope` 决定
+        # （issue matrix-tools#76：默认仍是全矩阵＝旧行为，换口径要先单仓试点）。
         #
         # 范围判定的**唯一逻辑来源**是 oracle 的 --print-scope（它读 GitHub 事件上下文）：
         # 两条门禁共用同一份判定，别在这个 YAML 里另造一份。
