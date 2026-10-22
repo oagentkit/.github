@@ -57,6 +57,16 @@ on:
         required: false
         type: string
         default: 'repo'
+      receipts-enabled:
+        description: '是否在本仓跑 issue 回执门禁（被机器自动关闭的 issue 必须留下带锚点的回执）。默认关：试点后翻默认；关着时 job 跑但跳过判定步骤，不产生任何结论'
+        required: false
+        type: boolean
+        default: false
+      receipts-scope:
+        description: '回执门禁在**非 PR 事件**（push / 定时 / 手动）下的范围口径：matrix = 全矩阵；repo = 只判调用方本仓（各仓自己 issue 的回执由它自己负责；跨仓全量审计由 matrix-tools 的每日定时 job 承担）'
+        required: false
+        type: string
+        default: 'repo'
 
 # 同一 ref 的重复触发取消旧 run（PR 连推 / main 连推不堆叠分钟数）
 concurrency:
@@ -334,3 +344,66 @@ jobs:
           --ci --org oagentkit
           --scope-mode ${{ inputs.changelog-scope }}
 
+  receipts:
+    name: Receipts (issue 回执落地)
+    # 被**机器自动关闭**的 issue（PR 正文 `Closes #N`，或 commit message 里的关闭关键词）
+    # 必须留下一条**带可核验锚点**的回执（PR 链接 / 版本号 / 完整提交 sha 之一）——
+    # 否则就是「关单成功、CI 绿、tag 已打，却没有任何地方会报错」（issue matrix-tools#71）。
+    #
+    # **范围由 oracle 判定**（别在这个 YAML 里另造一份）：
+    #   PR 事件   → 本 PR 的 base 仓（= 本 PR 触及的仓 = issue 所在仓）；
+    #   push/手动 → 调用方本仓；
+    #   schedule  → 全矩阵（周期性全量审计；模块仓目前没有 schedule 触发）。
+    #
+    # **归属地**：本 job 跑在**调用方仓**里，所以 GITHUB_REPOSITORY 就是被改的仓
+    # ⇒ 各仓自己 issue 的回执由它自己负责，别的仓的缺口不会把本仓的 PR 弄红
+    # （issue matrix-tools#90：此前这条链路在共享工作流里**根本不存在**）。
+    #
+    # **开关在步骤级**：登记表（matrix-tools/scripts/invariants.json）的第三腿只认
+    # `github.event_name` 形式的 job 级 `if:`，写成 `inputs.receipts-enabled` 会判黄。
+    # 开关关着时 job 照常跑（判定步骤跳过），日志里会明确打出「未开启」。
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: 回执门禁开关状态
+        # 开关状态**永远打印**：关着的时候也要能一眼看出「这个 job 什么都没判」
+        # （否则「job 绿着」会被误读成「回执门禁判过了且没问题」）。
+        run: |
+          if [ "${{ inputs.receipts-enabled }}" = "true" ]; then
+            echo "回执门禁**已开启**（范围口径 = ${{ inputs.receipts-scope }}）"
+          else
+            echo "回执门禁**未开启**（receipts-enabled=false）——本 job 不产生任何结论"
+          fi
+
+      - name: Checkout matrix-tools（判据脚本）
+        if: inputs.receipts-enabled
+        uses: actions/checkout@v7
+        with:
+          repository: oagentkit/matrix-tools
+          path: matrix-tools
+
+      - uses: actions/setup-python@v5
+        if: inputs.receipts-enabled
+        with:
+          python-version: '3.12'
+
+      - name: issue 回执落地对账
+        # 「判不了 ≠ 没问题」：取数失败判**黄灯**而不是绿灯——
+        # 否则门禁会在网络故障时静默放行，而故障恰好是最需要它的时候。
+        if: inputs.receipts-enabled
+        run: >-
+          python3 matrix-tools/scripts/verify_receipts.py
+          --ci --org oagentkit --scope-mode ${{ inputs.receipts-scope }}
+          --json-out receipts-report.json
+
+      - name: 上传回执缺口报告
+        if: always() && inputs.receipts-enabled
+        uses: actions/upload-artifact@v7
+        with:
+          name: receipts-report
+          path: receipts-report.json
+          if-no-files-found: ignore

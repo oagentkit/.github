@@ -77,9 +77,10 @@ CONTRIBUTING.md / SECURITY.md / SUPPORT.md
 | `Lint` | `go mod tidy -diff` → `gofmt -l` → `golangci-lint` | go.mod/go.sum 漂移；没格式化；lint 规则不通过 |
 | `Test` | `go vet` → `go test -race` → 覆盖率门禁 → govulncheck | 编译/测试失败；总覆盖率低于阈值；**govulncheck 是非阻塞报告**，只亮注解，不挡合并 |
 | `CHANGELOG coverage` | 扫 git 历史算应有条目，与 CHANGELOG.md 比对 | 该仓 CHANGELOG 缺条目或缺正文（脚本在 matrix-tools 仓，跑在调用方仓里） |
+| `Receipts` | 被机器自动关闭的 issue 必须有带锚点的回执 | 该仓有「机器关单 + 零回执」的 issue；**刚关单、还在补回执**的会判黄（不挡合并） |
 
-排查顺序：`Lint` → `Test` → `CHANGELOG coverage`。前两个是本仓规则本体的问题，
-第三个是矩阵级欠账（别在自己仓里找原因）。
+排查顺序：`Lint` → `Test` → `CHANGELOG coverage` → `Receipts`。前两个是本仓规则本体的问题，
+第三个是矩阵级欠账（别在自己仓里找原因），第四个是**本仓自己**的欠账。
 
 ### 本仓自身（`repo-ci.yml`）
 
@@ -88,8 +89,27 @@ CONTRIBUTING.md / SECURITY.md / SUPPORT.md
 | `Scripts` | `scripts/*.py` 的 `py_compile`、`scripts/*.sh` 的 `bash -n`、`--help` 冒烟 |
 | `Matrix docs drift` | llms.txt / versions.json 副本 / 门面守卫 / 陈旧包引用 / 幽灵包 / CHANGELOG 覆盖 —— **跨仓漂移** |
 | `YAML` | workflows + 模板 + dependabot 的 YAML 可解析 |
+| `Receipts` | 本仓自己 issue 的回执落地（`schedule` 事件不跑 —— 跨仓全量审计的归属地是 matrix-tools） |
 
 `workflow-lint.yml` 用 actionlint 做 Actions 语法自检，与 `repo-ci.yml` 互补。
+
+### issue 回执门禁：归属地与开关（issue matrix-tools#90）
+
+「**跨仓硬失败必须有唯一归属地**」——一个仓的欠账不该把别的仓的 CI 弄红。
+
+| 开关 | 默认 | 作用 |
+|---|---|---|
+| `receipts-enabled` | `false` | 是否在本仓跑回执门禁。关着时 job 照常跑（判定步骤跳过），日志里打出「未开启」 |
+| `receipts-scope` | `repo` | 非 PR 事件的范围口径：`repo` = 只判调用方本仓；`matrix` = 全矩阵 |
+
+- **PR 事件**：范围恒为 **PR 的 base 仓**（= issue 所在仓），与 scope 无关；
+- **push / 手动**：`repo` 口径 ⇒ 只判调用方本仓 ⇒ **各仓自己 issue 的回执由它自己负责**；
+- **schedule**：永远是全矩阵 —— 跨仓全量审计的**唯一硬失败归属地**是 matrix-tools
+  的每日 job（`cron: '17 6 * * *'`），收窄它＝跨仓欠账再也没人抓；
+- ⚠️ **开关在步骤级**：登记表的第三腿只认 `github.event_name` 形式的 job 级 `if:`，
+  写成 `inputs.receipts-enabled` 会判黄（判不了 ≠ 没问题）；
+- ⚠️ 本仓是**全 org 单点**（各仓以 `@main` 引用，没有回退选项）⇒ 走「input + 默认值」，
+  **先单仓试点再翻默认**；回退方式：把 `receipts-enabled` 默认改回 `false`。
 
 ### PR 事件 vs push / schedule 事件
 
@@ -99,13 +119,15 @@ CONTRIBUTING.md / SECURITY.md / SUPPORT.md
   所以改 agent 的 PR 只会被 agent 的 CHANGELOG 欠账挡住，不会被无关仓的欠账卡住。
 - **push / schedule / workflow_dispatch**：口径由 `go-ci.yml` 的 input
   **`changelog-scope`** 决定（issue matrix-tools#76）：
-  - `matrix`（**默认**＝旧口径）→ 走**全矩阵**——周期性全量审计兜底，不可省，
+  - `matrix`（旧口径）→ 走**全矩阵**——周期性全量审计兜底，不可省，
     否则就是漏检（PR 只查被触及的仓，没 PR 的漂移就没人看）。
-  - `repo` → **只校验调用方本仓**。理由：跨仓欠账不该让无关仓的 `main` 背红，
+  - `repo`（**当前默认**）→ **只校验调用方本仓**。理由：跨仓欠账不该让无关仓的 `main` 背红，
     而背红的那些徽章**永不自愈**（欠账修好后没人重跑那个仓 ⇒ 假红长期挂着，
     没有任何门禁会报「有 N 个仓的徽章是陈旧的」）。
   - ⚠️ **`repo` 口径下 schedule 事件仍是全矩阵**——那是周期性全量审计，
     把它一起收窄＝跨仓欠账再也没人抓（静默失效，而门禁照样全绿）。
+  - 回执门禁有自己的一对 input（`receipts-enabled` / `receipts-scope`），
+    口径与 `changelog-scope` 同源同规则（见上面「issue 回执门禁」一节）。
 - **跨仓硬失败的归属地**：`matrix-tools` 的**每日定时 job**（`cron: '17 6 * * *'`）
   与本仓 `repo-ci.yml` 的每日定时 job（`cron: '29 6 * * *'`）。前者守 CHANGELOG
   覆盖，后者守矩阵漂移 / 门面守卫 / 幽灵包。两边都靠**定时重算**让徽章自愈。
