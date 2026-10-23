@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import datetime
 import json
 import os
 import re
@@ -434,17 +435,7 @@ def _load_project_once(number: int) -> dict:
         total_counts.append(tc if isinstance(tc, int) else None)
         for n in page.get("nodes") or []:
             content = n.get("content") or {}
-            fv = {}
-            for x in n.get("fieldValues", {}).get("nodes", []):
-                fname = (x.get("field") or {}).get("name")
-                if not fname:
-                    continue
-                if "text" in x and x.get("text") is not None:
-                    fv[fname] = x.get("text")
-                elif "number" in x and x.get("number") is not None:
-                    fv[fname] = x.get("number")
-                else:
-                    fv[fname] = x.get("name")
+            fv = _parse_fv((n.get("fieldValues") or {}).get("nodes"))
             items.append(
                 {
                     "id": n["id"],
@@ -503,6 +494,222 @@ def _board_read_verdict(proj: dict) -> tuple[bool, str]:
     return True, f"读到 {got} 项，与 totalCount 一致"
 
 
+# ---------------------------------------------------------------------------
+# 板上成员的**逐条核实**（issue .github#24）
+# ---------------------------------------------------------------------------
+#
+# 为什么需要：
+#
+# `organization.projectV2.items` 这个连接返回的是**看板条目列表的快照**，
+# 而这个快照**不保证包含最近入板的条目**——实测（2026-10-23）同一个看板
+# 连读 6 次，每次读到的都是同一个「较旧的连续前缀」，缺口正好是
+# 「快照时刻之后入板的那批」：
+#
+#   · 板面 `items` 连接读到 495~498 项，`totalCount` 也是 495~498（**自洽**）
+#     ⇒ 现有的 `_board_read_verdict()`（只看条数与 totalCount 是否自洽）
+#     **判它可信** ⇒ 这就是 issue 里说的「自洽的旧快照，看不出异常」；
+#   · 但逐条反查（`Issue.projectItems` / `PullRequest.projectItems`，
+#     以及 `node(id:)`）证明那些条目**确实在板上**（连 Status/Kind/Module
+#     都读得到）；
+#   · 换 `first`（100/50/25/10）读出来的集合**完全相同** ⇒ 不是翻页漏项，
+#     是服务端返回的集合本身就少。
+#
+# ⇒ **「列表读里没有」不能推出「板上没有」**。
+#
+# 修法：**存在性判定不取自列表读**，改走**逐条核实**——
+# 对「采集到但列表读里没有」的每一条，去问「这条内容在板上有几条 item」
+# （内容侧索引是**按内容**组织的，不受项目条目列表快照的影响）。
+# 问得到 ⇒ 板上确实有（按板上算，不重复入板）；问不到 ⇒ 真的缺。
+#
+# ⚠️ 这条路径是**读**，不是写：不存在「为了核实而入板」的副作用。
+
+
+def _board_membership_batched(specs: list[tuple[str, str, int, bool]],
+                               project_id: str) -> dict[str, list[str]]:
+    """逐条核实「这条内容在不在看板上」→ {url: [板上 item id, ...]}。
+
+    specs: [(owner, repo, number, is_issue)]
+    只回**在目标看板上**的 item id；查不到的内容不出现在结果里。
+
+    ⚠️ 按 project **id**（`PVT_…`，全局唯一）匹配，**不按 number**：
+    `projectItems` 会回该内容在**所有**看板上的条目，而 project number 只在
+    owner 内唯一 ⇒ 别的 org 的「#1 看板」会被误认成目标看板。
+    """
+    out: dict[str, list[str]] = {}
+    chunk = 20
+    for start in range(0, len(specs), chunk):
+        group = specs[start:start + chunk]
+        parts = []
+        for i, (owner, name, num, is_issue) in enumerate(group):
+            field = "issue" if is_issue else "pullRequest"
+            parts.append(
+                f'  r{i}: repository(owner: "{owner}", name: "{name}") {{ '
+                f'{field}(number: {num}) {{ projectItems(first: 50) {{ '
+                f'nodes {{ id project {{ id }} }} }} }} }}'
+            )
+        query = "query {\n" + "\n".join(parts) + "\n}"
+        p = subprocess.run(
+            ["gh", "api", "graphql", "-f", f"query={query}"],
+            text=True, capture_output=True,
+        )
+        if p.returncode != 0:
+            raise SyncError(
+                f"逐条核实板上成员失败：{(p.stderr or p.stdout).strip()[:300]}"
+            )
+        try:
+            data = json.loads(p.stdout)
+        except json.JSONDecodeError as e:
+            raise SyncError(f"逐条核实返回非 JSON：{p.stdout[:200]}（{e}）")
+        if "errors" in data:
+            msgs = "; ".join(str(e.get("message", e)) for e in data["errors"])
+            raise SyncError(f"逐条核实 GraphQL 报错：{msgs}")
+        payload = data.get("data") or {}
+        for i, (owner, name, num, is_issue) in enumerate(group):
+            # ⚠️ alias 写在 repository 上时，**repository 的字段直接挂在 alias 下**
+            # （`r0: repository(...) { issue(...) }` ⇒ `data.r0.issue`），
+            # 不是 `data.r0.repository.issue`——写错一层就恒为空（静默失效）。
+            node = payload.get(f"r{i}") or {}
+            content = node.get("issue" if is_issue else "pullRequest") or {}
+            ids = [
+                n["id"]
+                for n in (content.get("projectItems") or {}).get("nodes") or []
+                if (n.get("project") or {}).get("id") == project_id
+            ]
+            if ids:
+                url = f"https://github.com/{owner}/{name}/{'issues' if is_issue else 'pull'}/{num}"
+                out[url] = ids
+    return out
+
+
+def _parse_fv(field_value_nodes: list[dict] | None) -> dict:
+    """`fieldValues.nodes` → {字段名: 值}（列表读与逐条核实共用同一套解析）。"""
+    fv: dict = {}
+    for x in field_value_nodes or []:
+        fname = (x.get("field") or {}).get("name")
+        if not fname:
+            continue
+        if "text" in x and x.get("text") is not None:
+            fv[fname] = x.get("text")
+        elif "number" in x and x.get("number") is not None:
+            fv[fname] = x.get("number")
+        else:
+            fv[fname] = x.get("name")
+    return fv
+
+
+# `ProjectV2Item.fieldValues` 的字段值片段（列表读与按 item id 读共用）。
+# ⚠️ GraphQL 的花括号必须**逐层配平**——多写一个 `}` 整条查询就语法错误，
+# 而错误信息只说「Expected one of SCHEMA...」，完全指不到「多了一个括号」。
+# ⇒ 这里用模板拼装，并由 `selftest_board_read()` 的括号配平断言守住。
+_ITEM_FIELD_VALUES_FRAGMENT = (
+    "... on ProjectV2ItemFieldSingleSelectValue { name field { "
+    "... on ProjectV2Field { id name } ... on ProjectV2SingleSelectField { id name } } } "
+    "... on ProjectV2ItemFieldTextValue { text field { "
+    "... on ProjectV2Field { id name } ... on ProjectV2SingleSelectField { id name } } } "
+    "... on ProjectV2ItemFieldNumberValue { number field { "
+    "... on ProjectV2Field { id name } ... on ProjectV2SingleSelectField { id name } } } "
+)
+
+
+def _graphql_braces_balanced(query: str) -> bool:
+    """查询文本的花括号是否配平（自测用：语法错误最难查的就是这个）。"""
+    depth = 0
+    for ch in query:
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
+def fetch_item_fields(item_ids: list[str], *, chunk: int = 20) -> dict[str, dict]:
+    """按 item id 读板面字段值 → {item_id: {字段名: 值}}。
+
+    为什么需要它：列表读漏掉的条目**确实在板上**（issue .github#24），
+    要判断它们的 Status/Kind/Module 是否需要改，只能按 item id 读——
+    列表读拿不到它们（那正是它漏掉的东西）。
+    """
+    out: dict[str, dict] = {}
+    for start in range(0, len(item_ids), chunk):
+        group = item_ids[start:start + chunk]
+        parts = [
+            f'  r{i}: node(id: "{iid}") {{ ... on ProjectV2Item {{ id '
+            f"fieldValues(first: 50) {{ nodes {{ {_ITEM_FIELD_VALUES_FRAGMENT}}} }} }} }}"
+            for i, iid in enumerate(group)
+        ]
+        query = "query {\n" + "\n".join(parts) + "\n}"
+        p = subprocess.run(
+            ["gh", "api", "graphql", "-f", f"query={query}"],
+            text=True, capture_output=True,
+        )
+        if p.returncode != 0:
+            raise SyncError(
+                f"按 item id 读字段值失败：{(p.stderr or p.stdout).strip()[:300]}"
+            )
+        try:
+            data = json.loads(p.stdout)
+        except json.JSONDecodeError as e:
+            raise SyncError(f"按 item id 读字段值返回非 JSON：{p.stdout[:200]}（{e}）")
+        if "errors" in data:
+            msgs = "; ".join(str(e.get("message", e)) for e in data["errors"])
+            raise SyncError(f"按 item id 读字段值 GraphQL 报错：{msgs}")
+        payload = data.get("data") or {}
+        for i, iid in enumerate(group):
+            node = payload.get(f"r{i}") or {}
+            if not node.get("id"):
+                continue
+            out[node["id"]] = _parse_fv(
+                (node.get("fieldValues") or {}).get("nodes")
+            )
+    return out
+
+
+def _current_project_id(number: int | None = None) -> str:
+    """目标看板的 node id（`PVT_…`）。
+
+    存在性核实按 **id** 匹配而不是按 number：project number 只在 owner 内唯一，
+    别的 org 的「#1 看板」会被误认成目标看板（实测 org 的看板 id 是
+    `PVT_kwDOFIGPU84Bnxh_`）。
+    """
+    n = PROJECT if number is None else number
+    data = gql(
+        "query($org: String!, $number: Int!) { organization(login: $org) "
+        "{ projectV2(number: $number) { id } } }",
+        org=ORG, number=str(n),
+    )
+    proj = (data.get("organization") or {}).get("projectV2") or {}
+    pid = proj.get("id")
+    if not pid:
+        raise SyncError(f"看板读不到：org {ORG} 下不存在 Project #{n}")
+    return pid
+
+
+def resolve_board_membership(items: list[dict], project_id: str) -> dict[str, list[str]]:
+    """核实这些条目**是不是已经在板上** → {url: [item id, ...]}。
+
+    这是**存在性判据的唯一真相源**（issue .github#24）：
+    列表读是快照、可能漏掉近期入板的条目 ⇒ 不能用它判「在不在板上」。
+
+    只对「列表读里没有」的那些条目调用（列表读里有的已经证实存在了），
+    所以这里的调用量是「缺口数」而不是「全量」——实测缺口 14~17 条。
+
+    `project_id` = 目标看板的 node id（`PVT_…`），按它匹配而不是按 number。
+    """
+    specs: list[tuple[str, str, int, bool]] = []
+    for it in items:
+        m = re.match(
+            r"https://github\.com/([^/]+)/([^/]+)/(issues|pull)/(\d+)", it["url"]
+        )
+        if not m:
+            raise SyncError(f"无法解析 URL：{it['url']}")
+        owner, name, kind, num = m.group(1), m.group(2), m.group(3), int(m.group(4))
+        specs.append((owner, name, num, kind == "issues"))
+    return _board_membership_batched(specs, project_id)
+
+
+
 def _audit_split(missing: list[str], added_urls: list[str]) -> tuple[list[str], list[str]]:
     """审计判定 → (真的缺, 刚入板但看板索引还没同步的)。
 
@@ -513,6 +720,54 @@ def _audit_split(missing: list[str], added_urls: list[str]) -> tuple[list[str], 
     just_added = set(added_urls)
     pending = sorted(set(missing) & just_added)
     return [u for u in missing if u not in just_added], pending
+
+
+def reconcile_membership(
+    collected_urls: list[str],
+    list_read_urls: set[str],
+    candidates: list[str],
+    added_urls: set[str] | None = None,
+    project_id: str | None = None,
+) -> tuple[list[str], list[str], list[str]]:
+    """把「采集到的」与「板上的」对账 → (真的缺, 读侧陈旧, 刚入板)。
+
+    **这是存在性判定的唯一口径**（issue .github#24）：
+    「列表读里没有」**不能**推出「板上没有」——`projectV2.items` 返回的是
+    快照，会漏掉近期入板的条目（实测：列表读 495~498 项且 `totalCount` 与之
+    自洽 ⇒ 旧判据看不出异常，但逐条反查证明那些条目确实在板上）。
+
+    三种「板上」各走各的证据：
+      ① `list_read_urls`  —— 列表读看到了（最常见）；
+      ② `candidates` 逐条核实（内容侧索引）确认在板上 ⇒ **读侧陈旧**；
+      ③ `added_urls`      —— 本次 mutation 返回了 item id ⇒ 刚入板、索引未同步。
+
+    ⚠️ 三者都没有 ⇒ **真的缺**（红）。任何一条证据缺失都**不**能判缺。
+
+    `candidates` = 「采集到但列表读里没有」的 url。核实走
+    `resolve_board_membership()`（模块级全局 ⇒ 可被自测替换，见反证样本）。
+    """
+    added_urls = added_urls or set()
+    candidates = list(candidates)
+    membership = (
+        resolve_board_membership(
+            [{"url": u} for u in candidates],
+            project_id if project_id is not None else _current_project_id(),
+        )
+        if candidates else {}
+    )
+    missing: list[str] = []
+    stale_read: list[str] = []
+    pending: list[str] = []
+    for u in collected_urls:
+        if u in list_read_urls:
+            continue
+        if u in membership:
+            stale_read.append(u)
+        elif u in added_urls:
+            pending.append(u)
+        else:
+            missing.append(u)
+    return missing, stale_read, pending
 
 
 def load_project(number: int, *, attempts: int = BOARD_READ_ATTEMPTS) -> dict:
@@ -957,7 +1212,42 @@ def sync_board(apply: bool) -> int:
     module_opts = opt_map(module_field) if module_field else {}
     module_id = module_field["id"] if module_field else None
 
+    # ---- 存在性判定：**不取自列表读**（issue .github#24）----
+    #
+    # 列表读（`projectV2.items`）是**快照**，会漏掉近期入板的条目，而且
+    # 漏得「很自洽」（`totalCount` 与读到的条数相等 ⇒ 旧判据看不出异常）。
+    # ⇒ 对「采集到、列表读里没有」的条目**逐条核实**它在不在板上：
+    #   在板上 ⇒ 不重复入板（并按 item id 读回字段值，字段照样对齐）；
+    #   不在   ⇒ 才是真的缺，走入板。
+    list_read_urls = {i["url"] for i in proj["items"] if i["url"]}
+    not_in_list = [it for it in items if it["url"] not in list_read_urls]
+    membership = (
+        resolve_board_membership(not_in_list, proj["id"]) if not_in_list else {}
+    )
+    if membership:
+        print(
+            f"  列表读缺 {len(not_in_list)} 条，逐条核实后 {len(membership)} 条"
+            f"**确实在板上**（读侧陈旧，非缺失）"
+        )
+
     by_url = {i["url"]: i for i in proj["items"] if i["url"]}
+    # 读侧陈旧的条目：按 item id 读回字段值，才能判断字段要不要对齐
+    stale_ids = [ids[0] for ids in membership.values() if ids]
+    stale_fv = fetch_item_fields(stale_ids) if stale_ids else {}
+    for url, ids in membership.items():
+        if not ids:
+            continue
+        by_url[url] = {
+            "id": ids[0],
+            "type": "ISSUE",
+            "url": url,
+            "title": next((i["title"] for i in items if i["url"] == url), ""),
+            "state": next((i["state"] for i in items if i["url"] == url), ""),
+            "repo": next((i["repo"] for i in items if i["url"] == url), ""),
+            "number": next((i["number"] for i in items if i["url"] == url), 0),
+            "fv": stale_fv.get(ids[0], {}),
+        }
+
     adds: list[dict] = []
     syncs: list[dict] = []
     for it in items:
@@ -1040,15 +1330,18 @@ def sync_board(apply: bool) -> int:
 
     # ---- 同步后审计：每条采集到的条目都必须在板上 ----
     #
-    # 这里有**两条**「读不到 ≠ 没有」，都必须处理（issue .github#22）：
+    # 这里有**三条**「读不到 ≠ 没有」，都必须处理：
     # ① 看板的 items 连接**间歇性**返回被截断/空的结果
     #    ⇒ `load_project()` 已做「校验 + 重读」，仍不可信就报取数失败；
     # ② 看板的 items 连接是**最终一致**的 ⇒ **刚入板**的条目在读里可能还看不到
     #    （实测：入板后 GraphQL 读里查不到，`totalCount` 也还是旧值）——
-    #    这一条由**入板结果**裁决：mutation 返回了 item id ⇒ 条目确实在板上。
+    #    这一条由**入板结果**裁决：mutation 返回了 item id ⇒ 条目确实在板上；
+    # ③ 看板的 items 连接返回的是**快照**，会**漏掉近期入板的条目**，
+    #    而且漏得很自洽（`totalCount` 与读到的条数相等 ⇒ ①的判据看不出异常）
+    #    —— 这是 issue .github#24 的根因。⇒ 这一条由**逐条核实**裁决。
     #
     # ⇒ 顺序：先读一次；「读里没有」就**再读一次**排除①；仍没有的，
-    #   再排除②（本次刚入板的）；剩下的才是**真的缺**。
+    #   再排除②（本次刚入板的）与③（逐条核实在板上的）；剩下的才是**真的缺**。
     after = load_project(PROJECT)
     board_urls = {x["url"] for x in after["items"] if x["url"]}
     missing = [i["url"] for i in items if i["url"] not in board_urls]
@@ -1059,13 +1352,22 @@ def sync_board(apply: bool) -> int:
         board_urls = {x["url"] for x in after["items"] if x["url"]}
         missing = [i["url"] for i in items if i["url"] not in board_urls]
 
-    missing, pending_idx = _audit_split(missing, added_urls)
+    # 排除③：逐条核实「读里没有」的那些到底在不在板上
+    missing, stale_read, pending_idx = reconcile_membership(
+        [i["url"] for i in items],
+        board_urls,
+        missing,
+        set(added_urls),
+        after["id"],
+    )
     print(
         f"  审计：板上 {len(after['items'])} 项"
         f"（totalCount {after.get('total_count')}，已对账）"
         f" / 采集 {len(items)} 条 → 缺 {len(missing)} 条"
         + (f"（另 {len(pending_idx)} 条本次刚入板，看板索引尚未同步，以入板结果为准）"
            if pending_idx else "")
+        + (f"；{len(stale_read)} 条列表读看不到但逐条核实**确实在板上**"
+           f"（读侧陈旧，非缺失）" if stale_read else "")
     )
 
     problems: list[str] = []
@@ -1457,6 +1759,67 @@ def selftest_board_read() -> int:
         check("刚入板的不算缺", missing, ["https://github.com/oagentkit/llm/issues/1"])
         check("刚入板的单独记账", pending_idx, ["https://github.com/oagentkit/llm/issues/2"])
 
+        # ---- 6b-2) 存在性判定：**列表读缺 ≠ 板上缺**（issue .github#24）
+        #
+        # 这是本轮修的根因：`projectV2.items` 返回的是快照，会漏掉近期入板的
+        # 条目，而且漏得**自洽**（totalCount 与条数相等 ⇒ 旧判据看不出异常）。
+        # ⇒ 逐条核实（在板上 ⇒ 读侧陈旧，不是缺失）必须能把它们救回来。
+        U1 = "https://github.com/oagentkit/llm/issues/1"
+        U2 = "https://github.com/oagentkit/llm/issues/2"
+        U3 = "https://github.com/oagentkit/llm/issues/3"
+
+        def fake_resolver(on_board: dict[str, list[str]]):
+            """假的逐条核实：只回 on_board 里那些（其余查不到 ⇒ 真的缺）。"""
+            return lambda items, project_id: {
+                it["url"]: on_board[it["url"]]
+                for it in items
+                if it["url"] in on_board
+            }
+
+        orig_resolve = globals()["resolve_board_membership"]
+        try:
+            globals()["resolve_board_membership"] = fake_resolver({U2: ["PVTI_u2"]})
+            miss, stale, pend = reconcile_membership(
+                [U1, U2, U3],
+                list_read_urls={U1},       # 列表读只看到 U1
+                candidates=[U2, U3],       # U2/U3 列表读里没有
+                added_urls={U3},           # U3 本次刚入板
+                project_id="PVT_fake",
+            )
+            check("读侧陈旧的条目不算缺", miss, [])
+            check("读侧陈旧的单独记账", stale, [U2])
+            check("刚入板的单独记账（对账口径）", pend, [U3])
+
+            # 三条证据都没有 ⇒ 真的缺（不能被「读不到」掩盖）
+            miss2, stale2, pend2 = reconcile_membership(
+                [U1], list_read_urls=set(), candidates=[U1],
+                added_urls=set(), project_id="PVT_fake",
+            )
+            check("无任何证据才算真缺", miss2, [U1])
+            check("真缺不算读侧陈旧", stale2, [])
+            check("真缺不算刚入板", pend2, [])
+
+            # ---- 6b-3) **反证样本**：把「逐条核实」短路成「永远空」⇒
+            #           读侧陈旧的条目必须被判成**缺**（否则用例没有鉴别力）
+            #
+            # 这一条是「用例本身能不能发现判据失效」的证明：若判据被短路，
+            # U2 会从「读侧陈旧」掉进「缺」⇒ 说明 6b-2 的绿是真绿，不是摆设。
+            globals()["resolve_board_membership"] = lambda items, project_id: {}
+            miss3, stale3, pend3 = reconcile_membership(
+                [U1, U2, U3],
+                list_read_urls={U1},
+                candidates=[U2, U3],
+                added_urls={U3},
+                project_id="PVT_fake",
+            )
+            check(
+                "反证：核实短路后 U2 变成缺（用例有鉴别力）",
+                miss3, [U2],
+            )
+            check("反证：核实短路后 U2 不再是读侧陈旧", stale3, [])
+        finally:
+            globals()["resolve_board_membership"] = orig_resolve
+
         # ---- 6c) resolve_node_ids：id 在 alias 下的 issue/pullRequest 里
         #           （旧写法恒为 None ⇒ 批量入板整批静默空转）
         with _fake_gh([{"data": {"r0": {"issue": {"id": "I_fake"}}}}]):
@@ -1465,6 +1828,53 @@ def selftest_board_read() -> int:
         with _fake_gh([{"data": {"r0": {"pullRequest": {"id": "PR_fake"}}}}]):
             got = resolve_node_ids(["https://github.com/oagentkit/llm/pull/1"])
         check("resolve_node_ids 取到 PR 的 id", got, ["PR_fake"])
+
+        # ---- 6d) **生成的 GraphQL 花括号必须配平**（issue .github#24 的修法里踩到）
+        #
+        # GraphQL 多写一个 `}` 的报错是「Expected one of SCHEMA, SCALAR, TYPE...」，
+        # 指向不了「多了一个括号」⇒ 用断言把这类错挡在自测里，别留到运行时。
+        check(
+            "字段值片段自身配平",
+            _graphql_braces_balanced(_ITEM_FIELD_VALUES_FRAGMENT),
+            True,
+        )
+        check(
+            "配平检查能识别多写的右括号",
+            _graphql_braces_balanced("a { b { c } } }"),
+            False,
+        )
+        check(
+            "配平检查能识别少写的右括号",
+            _graphql_braces_balanced("a { b { c } "),
+            False,
+        )
+        # 实际生成的查询：抓起来逐条验形状
+        captured: list[str] = []
+        orig_run = subprocess.run
+
+        def _capture(args, **kw):
+            captured.append(args[-1].split("query=", 1)[-1])
+            p = orig_run(["true"], text=True, capture_output=True)
+            p.stdout = json.dumps({"data": {}})
+            return p
+
+        try:
+            subprocess.run = _capture
+            try:
+                fetch_item_fields(["PVTI_a", "PVTI_b"])
+            except SyncError:
+                pass
+            try:
+                _board_membership_batched(
+                    [("oagentkit", "llm", 1, True), ("oagentkit", "llm", 2, False)], 1
+                )
+            except SyncError:
+                pass
+        finally:
+            subprocess.run = orig_run
+        check("抓到了字段值查询", len(captured) >= 2, True)
+        for i, q in enumerate(captured):
+            check(f"第 {i + 1} 条查询花括号配平", _graphql_braces_balanced(q), True)
 
         # ---- 7) 反证样本：把可信度判据短路成「永远可信」⇒ ③④⑤ 必须不再报错
         #         （否则这些用例对「判据失效」没有鉴别力）
