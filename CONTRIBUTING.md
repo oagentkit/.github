@@ -145,11 +145,20 @@ tag 快照里的 CHANGELOG.md 就**缺该 tag 自己的版本段**——发布�
 - **依赖闭包** —— 声明的 `dependsOn` 必须覆盖实际跨仓依赖：
   `verify_import_direction.py` 的「未声明 / 陈旧声明」判定。
 
-⚠️ 截至 2026-10-21 实测：`verify_import_direction.py` **尚未接进任何 CI**；
-`scripts/verify_split.py`（覆盖度 / 分层方向 / 依赖闭包 三项，即将退役删除）只校验**声明图**，
-且数据路径仍指向退役的 agentkit 单仓（实跑报
-`FileNotFoundError: docs/split-matrix/modules.json`）——**别把它当成在跑的门禁**。
-人工核对命令：
+✅ `verify_import_direction.py` **已接进 CI**（2026-10-21 起）——它跑在 matrix-tools 的
+`matrix-local-guards` job（`matrix-tools/.github/workflows/matrix-tools-ci.yml`），
+触发条件是 `pull_request` / `push` / `schedule` 三种都有：
+**分层方向违规会真的挡住合并**，不必等人工巡检。
+它在 `matrix-tools/scripts/invariants.json` 里登记为三条不变量
+（`tier-direction` / `dependency-declaration` / `facade-not-consumed-internally`），
+「承诺 ↔ 判据 ↔ 接线」由 `verify_inventory.py` 守。
+
+它的前身 `scripts/verify_split.py`（覆盖度 / 分层方向 / 依赖闭包 三项）只校验**声明图**，
+而声明图会漂（`llm` 声明依赖 `obs`/`runtime`，代码里早已不引）——
+该脚本**已于 2026-10-21 随守卫体系分层化删除**（matrix-tools#52），由
+`verify_import_direction.py` 取代。**别再照它的声明图口径造判据。**
+
+本地复算（可选；CI 已经跑过）：
 
 ```bash
 python3 matrix-tools/scripts/verify_import_direction.py --root <各仓父目录>
