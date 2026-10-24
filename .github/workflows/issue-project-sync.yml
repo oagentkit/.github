@@ -14,6 +14,11 @@ on:
     # 用 :23 而不是 :17——oekit 的同款轮询在 :17，两边错开。
     - cron: '23 * * * *'
   workflow_dispatch:
+    inputs:
+      simulate-no-pat:
+        description: '模拟「拿不到 PAT」的事件上下文（Dependabot / fork PR）：自测回落内置只读 token、看板同步步跳过。用来主动验证降级路径，而不是等下一个 Dependabot PR 才被动发现。'
+        type: boolean
+        default: false
   issues:
     types: [opened, closed, reopened]
   pull_request:
@@ -33,16 +38,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      # 探针：只把「PAT 是否可用」暴露成一个布尔量。
+      # 「有没有 PAT 可用」的唯一判据（工作流里只有这一处决定）。
+      #
+      #   正常事件（schedule / issues / pull_request）⇒ PAT 在则 'true'。
+      #   pull_request 且由 Dependabot / fork 触发 ⇒ GitHub **不提供 secrets**
+      #     ⇒ PAT 为空 ⇒ 'false'（实测 issue #29：run 40050342344 因 GH_TOKEN
+      #     为空而红，日志里 `env:` 段是空的 `GH_TOKEN:`）。
+      #   手动触发且 simulate-no-pat=true ⇒ 强制 'false'，用来**主动验证降级路径**
+      #     （否则这条路径只能等下一个 Dependabot PR 才被动发现）。
+      #
+      # ⚠️ 两处刻意的写法，踩了就静默走错分支：
+      #   1) 判据走 job 级 env：step 级 `if` 的可用上下文里**没有 secrets**（有 env）
+      #      ⇒ 不能写 `if: secrets.X != ''`。
+      #   2) 下游一律用**字符串比较** `== 'true'`，不用裸布尔：env 的值在表达式里
+      #      是字符串，裸真值判定对 'false' 字符串不可靠（'false' 非空 ⇒ 真）。
+      #
       # PAT 本体**不**放 job 级 env —— 那会让它出现在 checkout 等无关步骤的环境里。
-      #
-      # ⚠️ 为什么判据要走 env 绕一道：step 级 `if` 的可用上下文里**没有 secrets**
-      #    （有 env）⇒ 不能直接写 `if: secrets.OAGENTKIT_PROJECT_TOKEN != ''`。
-      #
-      # 实测（issue #29）：Dependabot 触发的 pull_request 运行**拿不到 secrets**
-      # ⇒ 该表达式为空 ⇒ 看板步在本事件上下文里做不了（内置 GITHUB_TOKEN 没有
-      # project scope，Dependabot 触发时它还是只读的）。
-      HAS_PROJECT_TOKEN: ${{ secrets.OAGENTKIT_PROJECT_TOKEN != '' }}
+      USE_PAT: ${{ secrets.OAGENTKIT_PROJECT_TOKEN != '' && (github.event_name != 'workflow_dispatch' || inputs['simulate-no-pat'] != true) }}
     steps:
       - uses: actions/checkout@v7
 
@@ -54,15 +66,14 @@ jobs:
         #
         # 凭据：自测是**只读**的——读一个公开仓的 modules.json
         # （scripts/sync-projects.py 的 selftest()：gh api 取 base64 → 解码 → 校验 JSON），
-        # **不需要 project scope** ⇒ 内置 github.token 就够。
+        # **不需要 project scope** ⇒ 内置 github.token（只读）就够。
         # 「内置 token 能读 matrix-tools」在本仓已有既证：repo-ci.yml 就是用
         # 默认 github.token（没传 token）checkout matrix-tools 与站点仓的。
         #
-        # `${{ a || b }}` 取第一个非空值 ⇒ PAT 在时用 PAT（保持原状），
-        # 不在时回落到内置 token ⇒ Dependabot / fork PR 不再恒红。
-        # 改的是**凭据来源**，不是**被测路径**：API 路径照走、照测。
+        # PAT 在时用 PAT（保持原状），不在时回落到内置 token ⇒ Dependabot / fork PR
+        # 不再恒红。改的是**凭据来源**，不是**被测路径**：API 路径照走、照测。
         env:
-          GH_TOKEN: ${{ secrets.OAGENTKIT_PROJECT_TOKEN || github.token }}
+          GH_TOKEN: ${{ env.USE_PAT == 'true' && secrets.OAGENTKIT_PROJECT_TOKEN || github.token }}
         run: python3 scripts/sync-projects.py --selftest
 
       - name: Sync org board
@@ -74,7 +85,7 @@ jobs:
         # 同步操作在这里不存在。覆盖不会丢：每小时 23 * * * * 的 cron 会做真正的对账，
         # PR 事件上的这一跳只是「顺带提前一次」。
         # 跳过时下面的 notice 步骤会在 run 里留痕，不是悄悄变绿。
-        if: env.HAS_PROJECT_TOKEN == 'true'
+        if: env.USE_PAT == 'true'
         env:
           GH_TOKEN: ${{ secrets.OAGENTKIT_PROJECT_TOKEN }}
           ORG: oagentkit
@@ -85,6 +96,6 @@ jobs:
 
       - name: Notice (board sync skipped)
         # 不让「跳过」变成无声无息：留一条注解，说明为什么没同步、谁会补上。
-        if: env.HAS_PROJECT_TOKEN != 'true'
+        if: env.USE_PAT != 'true'
         run: |
-          echo "::notice title=大盘同步已跳过::本事件上下文没有 OAGENTKIT_PROJECT_TOKEN（Dependabot / fork PR 不提供 secrets）⇒ 看板同步已跳过；每小时 23 * * * * 的 cron 会做真正的对账。清单 API 路径的自测已在上一步用内置 token 跑过。"
+          echo "::notice title=大盘同步已跳过::本事件上下文没有可用的 OAGENTKIT_PROJECT_TOKEN（Dependabot / fork PR 不提供 secrets）⇒ 看板同步已跳过；每小时 23 * * * * 的 cron 会做真正的对账。清单 API 路径的自测已在上一步用内置 token 跑过。"
