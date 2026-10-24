@@ -32,6 +32,17 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # 探针：只把「PAT 是否可用」暴露成一个布尔量。
+      # PAT 本体**不**放 job 级 env —— 那会让它出现在 checkout 等无关步骤的环境里。
+      #
+      # ⚠️ 为什么判据要走 env 绕一道：step 级 `if` 的可用上下文里**没有 secrets**
+      #    （有 env）⇒ 不能直接写 `if: secrets.OAGENTKIT_PROJECT_TOKEN != ''`。
+      #
+      # 实测（issue #29）：Dependabot 触发的 pull_request 运行**拿不到 secrets**
+      # ⇒ 该表达式为空 ⇒ 看板步在本事件上下文里做不了（内置 GITHUB_TOKEN 没有
+      # project scope，Dependabot 触发时它还是只读的）。
+      HAS_PROJECT_TOKEN: ${{ secrets.OAGENTKIT_PROJECT_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -40,17 +51,40 @@ jobs:
         # 只有 CI 才执行得到。实测（2026-10-20）就栽在这——API 分支用 JSON
         # 解析器去解析裸 base64 输出，本地全绿、CI 必红，且报错指不到真正原因。
         # 凡是「本地短路、只有 CI 才走到」的分支，都要有自测覆盖。
+        #
+        # 凭据：自测是**只读**的——读一个公开仓的 modules.json
+        # （scripts/sync-projects.py 的 selftest()：gh api 取 base64 → 解码 → 校验 JSON），
+        # **不需要 project scope** ⇒ 内置 github.token 就够。
+        # 「内置 token 能读 matrix-tools」在本仓已有既证：repo-ci.yml 就是用
+        # 默认 github.token（没传 token）checkout matrix-tools 与站点仓的。
+        #
+        # `${{ a || b }}` 取第一个非空值 ⇒ PAT 在时用 PAT（保持原状），
+        # 不在时回落到内置 token ⇒ Dependabot / fork PR 不再恒红。
+        # 改的是**凭据来源**，不是**被测路径**：API 路径照走、照测。
         env:
-          GH_TOKEN: ${{ secrets.OAGENTKIT_PROJECT_TOKEN }}
+          GH_TOKEN: ${{ secrets.OAGENTKIT_PROJECT_TOKEN || github.token }}
         run: python3 scripts/sync-projects.py --selftest
 
       - name: Sync org board
+        # 看板读写需要 project（读写）scope ⇒ 必须用 PAT。
+        # 所需权限：project（读写）+ read:org + repo
+        #
+        # 拿不到 PAT 时**跳过并说明**，而不是红：
+        # 这里不是「读了但读不到」，而是「此事件上下文**根本没有凭据**」——
+        # 同步操作在这里不存在。覆盖不会丢：每小时 23 * * * * 的 cron 会做真正的对账，
+        # PR 事件上的这一跳只是「顺带提前一次」。
+        # 跳过时下面的 notice 步骤会在 run 里留痕，不是悄悄变绿。
+        if: env.HAS_PROJECT_TOKEN == 'true'
         env:
-          # GITHUB_TOKEN 默认无 project scope，走 PAT。
-          # 所需权限：project（读写）+ read:org + repo
           GH_TOKEN: ${{ secrets.OAGENTKIT_PROJECT_TOKEN }}
           ORG: oagentkit
           PROJECT: '1'
         run: |
           set -euo pipefail
           python3 scripts/sync-projects.py --apply
+
+      - name: Notice (board sync skipped)
+        # 不让「跳过」变成无声无息：留一条注解，说明为什么没同步、谁会补上。
+        if: env.HAS_PROJECT_TOKEN != 'true'
+        run: |
+          echo "::notice title=大盘同步已跳过::本事件上下文没有 OAGENTKIT_PROJECT_TOKEN（Dependabot / fork PR 不提供 secrets）⇒ 看板同步已跳过；每小时 23 * * * * 的 cron 会做真正的对账。清单 API 路径的自测已在上一步用内置 token 跑过。"
