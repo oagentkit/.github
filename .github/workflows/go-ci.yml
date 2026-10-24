@@ -329,7 +329,7 @@ jobs:
           repository: oagentkit/matrix-tools
           path: matrix-tools
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -386,7 +386,7 @@ jobs:
           repository: oagentkit/matrix-tools
           path: matrix-tools
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         if: inputs.receipts-enabled
         with:
           python-version: '3.12'
