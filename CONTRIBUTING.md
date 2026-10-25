@@ -98,12 +98,26 @@ tag 快照里的 CHANGELOG.md 就**缺该 tag 自己的版本段**——发布�
 **第 4 步（跨仓，刷新版本矩阵）**
 
 ```
-4. 刷新矩阵源：cd matrix-tools && python3 scripts/gen_versions.py --org oagentkit
+4. 刷新矩阵源：python3 matrix-tools/scripts/release.py --root <矩阵根> sync-matrix
    → 提交 matrix-tools/versions.json（**先合源**）
-   → cp matrix-tools/versions.json oagentkit.github.io/docs/public/versions.json
-   → 同步站点 data/modules.json（站点的矩阵数据源，与 modules.json 同源）
-   → 提交站点仓
+   → 提交站点仓：docs/public/versions.json（versions.json 的逐字节副本）
+                + data/modules.json（矩阵源 modules.json 的逐字节副本）
 ```
+
+`sync-matrix` 会把**两份**站点副本都拷好。纪律不变：**源先、副本后**——
+矩阵源的 PR 先合，站点仓的 PR 后合（工具只做本地拷贝，两次提交由人分两次做）。
+
+**⚠️ 别再手跑 `gen_versions.py --org oagentkit` 来刷矩阵源**（2026-10-26 改口径）：
+它**不带本地根** ⇒ 算不出「抬地板」（floorBumps 要读各仓**相邻两个 tag** 处的
+go.mod 差异），只能「搬运既有值」⇒ **门面每次抬地板，矩阵源都少一条
+「下游必须跑 `go mod tidy`」的登记**（issue matrix-tools#133 实测：
+138 条只算出 137 条，被吞掉的正是刚发那一版）。
+
+`sync-matrix` 用的是 `--floor-root`：**只**把 floorBumps 切到本地现算，
+breakingIndex / depFloor 仍走联网口径（本地克隆可能比远旧，让它们走本地会**倒退**）。
+各仓克隆必须**完整**（不是浅克隆、tag 要齐）；取不到时工具会退化成「搬运」
+并在报告里报**黄灯**——那意味着抬地板的登记可能少了几条，
+先把各仓 `git fetch --unshallow --tags` 再重跑。
 
 **为什么第 4 步不能反**（实测 2026-10-21）：
 
@@ -123,6 +137,10 @@ tag 快照里的 CHANGELOG.md 就**缺该 tag 自己的版本段**——发布�
 （`python3 scripts/gen_module_pages.py --check` 校验生成物是否已更新）。
 实测 2026-10-21：站点 `data/modules.json` 曾缺 `llm/port`（站点副本落后于矩阵源）——
 就是这一步缺失的直接后果。
+
+现在这一步由 `release.py sync-matrix` **自动完成**（它会把 `data/modules.json` 一并拷过去，
+并在报告里说明拷了没拷、是否本来就一致），且 `verify_modules_copy.py` 会
+**逐字段比对**两份 ⇒ 漏了会判红，不再是「纯手工动作、漏了没人报」。
 
 **⚠️ 重生成 CHANGELOG 会吞掉待发版段**
 
