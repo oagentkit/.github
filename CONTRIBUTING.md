@@ -152,6 +152,33 @@ breakingIndex / depFloor 仍走联网口径（本地克隆可能比远旧，让�
 - oagentkit 当前**没有嵌套模块**（所有包都是三层路径 `github.com/oagentkit/<repo>/<pkg>`）。
   将来若引入嵌套子模块，各自独立 tag 并在文档中注明归属。
 
+### ⚠️ 破坏式发布：提交正文里写一行 `BREAKING CHANGE:`
+
+矩阵对下游公开的**破坏性变更清单**（`matrix-tools/versions.json` 的 `breakingIndex`，
+站点与 llms.txt 直接引用它）是从各仓 `CHANGELOG.md` **自动抽取**的，判定规则见
+`matrix-tools/scripts/breaking_index.py`；CHANGELOG 的正文又来自**提交正文**
+⇒ **破坏式发布必须在提交正文里写一行 `BREAKING CHANGE: …`**（conventional commit
+的 trailer 形态），它才会被登记到 breakingIndex。
+
+**为什么这条是硬要求**：矩阵漏登记 = **对下游说谎**。实测 2026-10-28
+（mcpkit v0.9.0）：版本段里明确写着两处破坏（`Allow` 缺省反转、工具暴露名带
+server 命名空间），但提交正文只用了中文散文「破坏式变更（…）」⇒ 抽取器与独立
+oracle **都**收不到 ⇒ 矩阵说「mcpkit 无破坏性变更」⇒ 下游照矩阵升版 ⇒ 配置里
+`allow: []` 的那个 server 从「拿到全部工具」**静默变成「一个工具都拿不到」**，
+而配置里看不出任何变化。
+
+**记在哪**：提交正文（squash 合并后它就是发布说明的正文）。多个提交的 PR，
+squash 后的正文来自 PR 正文 ⇒ 两处都写。
+
+**兜底**：判定规则已补「行首中文声明」（`破坏性变更` / `破坏式变更` 顶格成行）
+作为第二条识别路径（matrix-tools#150）——但那是**兜底**，不是主路径：
+它只认行首、排除否定形态（`破坏性变更：无`）与核对记录（`破坏性变更核对（…）`）。
+**主路径永远是英文 trailer**，它的判定最窄、最不会误伤。
+
+**注意**：已发布 tag 的 CHANGELOG 段是**快照**（提交正文渲染而来）⇒ 漏标记的版本
+**改不了**（tag 不可重打）⇒ 只能靠判定规则的兜底路径追溯登记，或在下一版里
+写明。⇒ 标记要在**发布前**写。
+
 ## 矩阵卫生
 
 矩阵不变量由 [matrix-tools](https://github.com/oagentkit/matrix-tools) 的脚本判定：
