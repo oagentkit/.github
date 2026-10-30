@@ -104,6 +104,24 @@ tag 快照里的 CHANGELOG.md 就**缺该 tag 自己的版本段**——发布�
                 + data/modules.json（矩阵源 modules.json 的逐字节副本）
 ```
 
+**⚠️ 刷新前先把各仓的 tag 补齐**（2026-10-31 实测）：
+
+```
+for r in <各模块仓> <门面>; do git -C "$r" fetch --tags origin; done
+```
+
+`floorBumps`（依赖地板抬高）按「**相邻**两个 tag 处的 go.mod 差异」算 ⇒
+本地 tag 集合一旦残缺，相邻对就是错的 ⇒ 算出来的条目**变少**，而工具**不报错**
+（它只是按手头的 tag 算，输出「看起来正常」）。
+
+实测：本地 tag 陈旧（skillkit 缺 3 / toolgate 缺 5 / mcpkit 缺 3 个）
+⇒ floorBumps **漏算 35 条**（151 → 116）⇒ 若这结果被写进 versions.json
+⇒ **数据回退被发布出去**（下游看不到真实的地板抬升历史）。
+
+> 2026-10-31 起，`gen_floor_bumps.py` 在本地模式下会**先核对 tag 完整性**
+> （本地 ⊇ 远端 root tag）：缺则**直接报错**，`gen_versions.py` 随即退回
+> 「搬运既有值」——**宁可不刷新，也不发布错值**。
+
 `sync-matrix` 会把**两份**站点副本都拷好。纪律不变：**源先、副本后**——
 矩阵源的 PR 先合，站点仓的 PR 后合（工具只做本地拷贝，两次提交由人分两次做）。
 
