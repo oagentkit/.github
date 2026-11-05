@@ -51,6 +51,31 @@ PAGE_LIMIT = int(os.environ.get("PAGE_LIMIT", "200"))
 # 单选字段的选项配色轮转
 COLOR_CYCLE = ["GRAY", "BLUE", "GREEN", "YELLOW", "ORANGE", "RED", "PINK", "PURPLE"]
 
+# 钉死的视图配置（对齐 oekit 模式）：{视图名: {"filter": ..., "columns": [...]}}
+#
+# 为什么要有这层：视图的**过滤器**与**可见列**是公开 GraphQL 写得下去的
+# （updateProjectV2View 的 filter / configuration{visibleFieldIds}）⇒ 可以脚本自愈，
+# UI 上被人手改乱了会被下一轮同步改回来。
+#
+# 但**分组**（表格视图的 Group by / 看板视图的 Column by）写不了：
+# UpdateProjectV2ViewInput 里没有 groupBy 字段 ⇒ 分组只能靠 UI 落盘，
+# 脚本这边只能**声明期望值**（见 PINNED_GROUPS），漂移时告警。
+PINNED_VIEWS: dict[str, dict] = {
+    "总览": {"filter": "", "columns": ["Title", "Status", "Kind", "Module", "Created"]},
+    "开启": {"filter": "status:Todo", "columns": ["Title", "Kind", "Module", "Created"]},
+    "关闭": {"filter": "status:Done", "columns": ["Title", "Kind", "Module", "Closed"]},
+    "看板": {"filter": "", "columns": ["Title", "Status", "Kind", "Module"]},
+    "按模块": {"filter": "", "columns": ["Title", "Module", "Status", "Created"]},
+    "按类型": {"filter": "", "columns": ["Title", "Kind", "Module", "Created"]},
+}
+
+# 分组的期望值（Group by / Column by）——**只声明、只告警**，写不了。
+PINNED_GROUPS: dict[str, str] = {
+    "看板": "Kind",
+    "按模块": "Module",
+    "按类型": "Kind",
+}
+
 
 class SyncError(RuntimeError):
     """硬失败：必须让 workflow 红掉，不能静默跳过。"""
@@ -1955,6 +1980,84 @@ def selftest() -> int:
     return selftest_board_read()
 
 
+def sync_pinned_view_configs(apply: bool) -> None:
+    """把 PINNED_VIEWS 声明的视图过滤器与可见列写回板（脚本自愈）。
+
+    分组不在这里：Group by / Column by **写不了**（见 PINNED_GROUPS 的说明）。
+    """
+    print("\n=== 视图配置钉死 ===")
+    proj = load_project(PROJECT)
+    pid = proj["id"]
+
+    # 拉视图列表
+    data = gql("""
+        query($org: String!, $number: Int!) {
+          organization(login: $org) {
+            projectV2(number: $number) {
+              views(first: 20) {
+                nodes { id name filter fields(first: 20) { nodes { ... on ProjectV2Field { id name } ... on ProjectV2SingleSelectField { id name } } } }
+              }
+            }
+          }
+        }
+    """, org=ORG, number=str(PROJECT))
+    views = data["organization"]["projectV2"]["views"]["nodes"]
+
+    fields_meta = proj["fields"]
+
+    for v in views:
+        name = v["name"]
+        if name not in PINNED_VIEWS:
+            continue
+        spec = PINNED_VIEWS[name]
+        vid = v["id"]
+        cur_filter = v.get("filter") or ""
+        want_filter = spec.get("filter", "")
+
+        # 过滤器
+        if cur_filter != want_filter:
+            print(f"  ~ {name}: filter {cur_filter!r} → {want_filter!r}")
+            if apply:
+                gql(f'''
+                    mutation {{
+                      updateProjectV2View(input: {{ viewId: "{vid}", filter: "{want_filter}" }}) {{
+                        projectV2View {{ id }}
+                      }}
+                    }}
+                ''')
+
+        # 可见列（configuration.visibleFieldIds）
+        want_cols = spec.get("columns", [])
+        if want_cols:
+            want_ids = []
+            for cn in want_cols:
+                fm = fields_meta.get(cn)
+                if fm:
+                    want_ids.append(fm["id"])
+            cur_col_ids = {f["id"] for f in (v.get("fields") or {}).get("nodes", [])}
+            want_id_set = set(want_ids)
+            if cur_col_ids != want_id_set:
+                print(f"  ~ {name}: columns 不一致（{len(cur_col_ids)} vs {len(want_id_set)}）")
+                if apply:
+                    ids_json = json.dumps(want_ids)
+                    gql(f'''
+                        mutation {{
+                          updateProjectV2View(input: {{
+                            viewId: "{vid}",
+                            configuration: {{ visibleFieldIds: {ids_json} }}
+                          }}) {{ projectV2View {{ id }} }}
+                        }}
+                    ''')
+
+    # 分组告警（写不了，只声明）
+    for v in views:
+        name = v["name"]
+        if name in PINNED_GROUPS:
+            print(f"  · {name}: 分组期望 = {PINNED_GROUPS[name]}（需 UI 确认）")
+
+    print("  ✓ 视图配置检查完成")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true", help="真正落盘（默认 dry-run）")
@@ -1980,7 +2083,9 @@ def main() -> int:
             refresh_module(args.refresh_module)
             print("\nOK")
             return 0
-        return sync_board(args.apply)
+        rc = sync_board(args.apply)
+        sync_pinned_view_configs(args.apply)
+        return rc
     except SyncError as e:
         print(f"\nFAIL: {e}", file=sys.stderr)
         return 1
