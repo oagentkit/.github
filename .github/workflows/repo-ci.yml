@@ -93,8 +93,21 @@ jobs:
     name: Matrix docs drift
     # 防的是「已退役结论被重新生成回文档」：matrix-tools/modules.json 是单一数据源，
     # oagentkit.github.io 的 llms.txt 是它的生成物。两者漂移时 AI Agent 会读到失效结论。
+    #
+    # ⚠️ 各门禁彼此独立，job 不 fail-fast（issue #35）：此前首个门禁红 ⇒ 后续 15 个
+    # 跨仓门禁（幽灵包 / 陈旧引用 / 门面符号……）全部 skipped，连续 8 天一次没跑——
+    # 「判据不可用即绿」的最极端形态。现在每个门禁步骤都有 id + `!cancelled()`：
+    #   - 前面的门禁红 ⇒ 后面的门禁**照跑**；用 `!cancelled()` 而非 `always()`，
+    #     是取消时（本 job 配了 concurrency cancel-in-progress）不再空跑十几个克隆；
+    #   - 供后续门禁用的两个 Checkout 步骤同样 `!cancelled()`——它们是依赖不是门禁，
+    #     前面的门禁红也得把「弹药」备好；
+    #   - 结尾「汇总」步骤聚合全部 outcome，任一 failure/cancelled/skipped ⇒ job 红，
+    #     且**一次性列出全部红项**（fail-fast 时代只报得出第一个）；门禁没跑起来
+    #     （skipped）也算红——判据不可用 ≠ 判绿。
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # 全门禁跑满 ≈ 4 分钟（run 41312524547 实测）；本 job 现在**每轮都跑满**
+    # （不再被首步红提前掐断）⇒ 5 分钟余量太薄，给到 10。
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -126,6 +139,12 @@ jobs:
           path: site
 
       - name: llms.txt 与 modules.json 一致
+        id: llms_docs
+        if: ${{ !cancelled() }}
+        # 已知红因（2026-11-02 起连红 8 天；数据侧归 #199 修，本 job 只负责让这个红
+        # **不再掐断后面 15 个门禁**）：站点仓提交的 llms.txt 是 gen_llms_txt.py 带着
+        # 本机 --site 路径生成的——版本矩阵段嵌了 /Users/zhangyi/... 绝对路径（应为
+        # https://oagentkit.github.io/...），且破坏性变更计数落后（19 vs 20）。
         run: |
           set -euo pipefail
           python3 matrix-tools/scripts/verify_docs.py \
@@ -133,6 +152,8 @@ jobs:
             --llms site/docs/public/llms.txt
 
       - name: profile 分层表与 modules.json 一致
+        id: profile_tiers
+        if: ${{ !cancelled() }}
         # profile 是 org 的门面页（人类与 AI Agent 的第一入口），
         # 它给出的分层必须与单一数据源一致。
         # 实测 2026-10-21：profile 的 tier 表曾在 5 个仓上与 modules.json 冲突
@@ -150,6 +171,8 @@ jobs:
             --profile profile/README.md
 
       - name: 站点 versions.json 是 matrix-tools 的逐字节副本
+        id: versions_drift
+        if: ${{ !cancelled() }}
         # 上一步查的是「生成物 vs 数据源」。这一步查的是「副本 vs 原件」——
         # 站点 docs/public/versions.json 是 matrix-tools/versions.json 的拷贝，
         # 此前没有任何检查比对两者，「改了这边忘了那边」在 CI 里是全绿的。
@@ -162,11 +185,15 @@ jobs:
             --compare site/docs/public/versions.json
 
       - name: 门面仓守卫自测
+        id: facade_imports_selftest
+        if: ${{ !cancelled() }}
         # 守卫脚本最危险的失效模式是「一直绿，但从没生效过」——
         # 豁免名单写错一个字符，它就会静默放过所有违规。所以必须证明它还活着。
         run: python3 matrix-tools/scripts/check_facade_imports.py --selftest
 
       - name: Checkout 矩阵各仓（供门面仓扫描）
+        id: checkout_matrix
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           mkdir -p matrix
@@ -184,6 +211,8 @@ jobs:
           ")
 
       - name: 扫描矩阵各仓是否仍引门面仓/旧单仓
+        id: facade_imports
+        if: ${{ !cancelled() }}
         # 门面仓 agentkit 计划 v1.x 后 archive。现在只有文档约束，
         # 半年后有人写一个新 import 不会有人收到通知 —— 这条把它变成红灯。
         run: |
@@ -191,6 +220,8 @@ jobs:
           python3 matrix-tools/scripts/check_facade_imports.py --roots matrix
 
       - name: 扫描文档里的陈旧包引用
+        id: stale_refs
+        if: ${{ !cancelled() }}
         # 防的是「看起来合法但已经错了」的结论。runtime/breaker 退役后，
         # textx/AGENTS.md 仍把熔断归给 runtime/breaker —— 照着 import 会
         # module not found，而人工 review 恰恰最容易漏这类（仓还在，只是包没了）。
@@ -201,6 +232,8 @@ jobs:
             --root . --verbose
 
       - name: 检测幽灵包（仓里有、矩阵未登记）
+        id: ghost_packages
+        if: ${{ !cancelled() }}
         # guardx/injectband 提交时带了代码 + 测试 + README，CI 全绿，
         # 但没进 modules.json —— 于是它成了矩阵外的存在：消费方在
         # versions.json / llms.txt 里看不到它，分层与依赖闭包门禁对它完全失效。
@@ -212,6 +245,8 @@ jobs:
             --root . --repos-dir matrix --verbose
 
       - name: Checkout 门面仓（供 re-export 覆盖校验）
+        id: checkout_facade
+        if: ${{ !cancelled() }}
         # 门面仓不在 modules.json 里（它不是矩阵模块，是兼容层），
         # 所以上面那个 clone 循环不会带上它，得单独 checkout。
         run: |
@@ -219,6 +254,8 @@ jobs:
           git clone -q --depth 1 "https://github.com/oagentkit/agentkit.git" "matrix/agentkit"
 
       - name: 各仓 CHANGELOG 未过期（PR 范围裁剪）
+        id: changelog_coverage
+        if: ${{ !cancelled() }}
         # CONTRIBUTING 要求各仓 CHANGELOG.md 在场且不过期。此前 13 个仓一个都没有，
         # 现在由 matrix-tools/scripts/gen_changelogs.py 从 git 历史生成并守住一致性。
         #
@@ -266,6 +303,8 @@ jobs:
           exit "$fail"
 
       - name: 门面仓 re-export 覆盖完整性
+        id: facade_packages
+        if: ${{ !cancelled() }}
         # 防的是「矩阵新增了一个包，门面没跟上」——实测 2026-10-19：
         # 矩阵已 47 个包，门面只有 45 个，缺 toolgate/invoke 与 guardx/injectband。
         # 后果不是编译失败，而是走门面的下游**根本够不到这两个包**：
@@ -282,6 +321,8 @@ jobs:
             --facade matrix/agentkit
 
       - name: 门面仓符号级转发完整性
+        id: facade_symbols
+        if: ${{ !cancelled() }}
         # 上一条查的是**包**的覆盖，这条查的是**包内符号**的覆盖——
         # 两者是不同的洞：包齐全 ≠ 符号齐全。
         #
@@ -302,14 +343,20 @@ jobs:
             --facade matrix/agentkit
 
       - name: 门面仓发布地板守卫自测
+        id: facade_release_selftest
+        if: ${{ !cancelled() }}
         # 同 check_facade_imports：必须证明这条守卫还活着。
         # 判据里特意放了「门面接 v0.1.0」这个样本 —— 那是线上真实发生过的形态。
         run: python3 matrix-tools/scripts/verify_facade_release.py --selftest
 
       - name: 门面 re-export 覆盖守卫自测
+        id: facade_packages_selftest
+        if: ${{ !cancelled() }}
         run: python3 matrix-tools/scripts/verify_facade_packages.py --selftest
 
       - name: 门面仓已发布 tag 的依赖地板
+        id: facade_release_tags
+        if: ${{ !cancelled() }}
         # 防的是「main 修好了、tag 没修」这类只有发版才暴露的缺陷。
         # Go 的 MVS 只看被消费版本的 go.mod：门面仓 agentkit 若发 tag 时
         # go.mod 还钉着 v0.1.0，消费方 go get 门面仓会静默拿到拆分初期的
@@ -323,6 +370,72 @@ jobs:
         run: |
           set -euo pipefail
           python3 matrix-tools/scripts/verify_facade_release.py --org oagentkit
+
+      - name: 汇总各门禁结论（任一非 success ⇒ job 红）
+        # fail-fast 拆除后的收口：聚合上面每个门禁步骤的 outcome，
+        # 任一 failure / cancelled / skipped ⇒ 本步骤退出 1（job 红）。
+        # 与 fail-fast 时代的差别：
+        #   - 到这里时**所有门禁都已经跑完**，能一次性列出全部红项，
+        #     而不是只报出第一个（issue #35 的核心诉求）；
+        #   - skipped 也算红——「门禁没跑起来」是判据不可用，不是判绿。
+        #   （门禁步骤自身的失败本来就会把 job 判红；这一步额外保证
+        #   「有红必红」有且只有一个出口，并产出完整红项清单。）
+        if: ${{ !cancelled() }}
+        env:
+          OUT_LLMS_DOCS: ${{ steps.llms_docs.outcome }}
+          OUT_PROFILE_TIERS: ${{ steps.profile_tiers.outcome }}
+          OUT_VERSIONS_DRIFT: ${{ steps.versions_drift.outcome }}
+          OUT_FACADE_IMPORTS_SELFTEST: ${{ steps.facade_imports_selftest.outcome }}
+          OUT_CHECKOUT_MATRIX: ${{ steps.checkout_matrix.outcome }}
+          OUT_FACADE_IMPORTS: ${{ steps.facade_imports.outcome }}
+          OUT_STALE_REFS: ${{ steps.stale_refs.outcome }}
+          OUT_GHOST_PACKAGES: ${{ steps.ghost_packages.outcome }}
+          OUT_CHECKOUT_FACADE: ${{ steps.checkout_facade.outcome }}
+          OUT_CHANGELOG_COVERAGE: ${{ steps.changelog_coverage.outcome }}
+          OUT_FACADE_PACKAGES: ${{ steps.facade_packages.outcome }}
+          OUT_FACADE_SYMBOLS: ${{ steps.facade_symbols.outcome }}
+          OUT_FACADE_RELEASE_SELFTEST: ${{ steps.facade_release_selftest.outcome }}
+          OUT_FACADE_PACKAGES_SELFTEST: ${{ steps.facade_packages_selftest.outcome }}
+          OUT_FACADE_RELEASE_TAGS: ${{ steps.facade_release_tags.outcome }}
+        run: |
+          set -euo pipefail
+          fail=0
+          verdict() {
+            local name="$1" outcome="$2"
+            case "$outcome" in
+              success)
+                echo "✅ ${name}"
+                ;;
+              skipped)
+                echo "🚫 ${name}: skipped —— 门禁没跑起来也算红（判据不可用 ≠ 判绿，issue #35）"
+                fail=1
+                ;;
+              *)
+                echo "❌ ${name}: ${outcome}"
+                fail=1
+                ;;
+            esac
+          }
+          verdict 'llms.txt 与 modules.json 一致' "${OUT_LLMS_DOCS}"
+          verdict 'profile 分层表与 modules.json 一致' "${OUT_PROFILE_TIERS}"
+          verdict '站点 versions.json 是 matrix-tools 的逐字节副本' "${OUT_VERSIONS_DRIFT}"
+          verdict '门面仓守卫自测' "${OUT_FACADE_IMPORTS_SELFTEST}"
+          verdict 'Checkout 矩阵各仓（供门面仓扫描）' "${OUT_CHECKOUT_MATRIX}"
+          verdict '扫描矩阵各仓是否仍引门面仓/旧单仓' "${OUT_FACADE_IMPORTS}"
+          verdict '扫描文档里的陈旧包引用' "${OUT_STALE_REFS}"
+          verdict '检测幽灵包（仓里有、矩阵未登记）' "${OUT_GHOST_PACKAGES}"
+          verdict 'Checkout 门面仓（供 re-export 覆盖校验）' "${OUT_CHECKOUT_FACADE}"
+          verdict '各仓 CHANGELOG 未过期（PR 范围裁剪）' "${OUT_CHANGELOG_COVERAGE}"
+          verdict '门面仓 re-export 覆盖完整性' "${OUT_FACADE_PACKAGES}"
+          verdict '门面仓符号级转发完整性' "${OUT_FACADE_SYMBOLS}"
+          verdict '门面仓发布地板守卫自测' "${OUT_FACADE_RELEASE_SELFTEST}"
+          verdict '门面 re-export 覆盖守卫自测' "${OUT_FACADE_PACKAGES_SELFTEST}"
+          verdict '门面仓已发布 tag 的依赖地板' "${OUT_FACADE_RELEASE_TAGS}"
+          if [ "$fail" -ne 0 ]; then
+            echo ""
+            echo "⛔ Matrix docs drift：本轮红项已全部列出（上）；逐项修复前 job 保持红。"
+          fi
+          exit "$fail"
 
   yaml:
     name: YAML
