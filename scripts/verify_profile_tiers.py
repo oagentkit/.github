@@ -69,6 +69,7 @@ REPO_ROOT = HERE.parent
 
 DEFAULT_MATRIX = REPO_ROOT.parent / "matrix-tools" / "modules.json"
 DEFAULT_PROFILE = REPO_ROOT / "profile" / "README.md"
+DEFAULT_CONTRIBUTING = REPO_ROOT / "CONTRIBUTING.md"
 
 
 def load_modules(path: Path) -> list[dict]:
@@ -122,6 +123,73 @@ def split_region(text: str) -> tuple[int, int]:
     return i + len(BEGIN), j
 
 
+def parse_contributing_table(text: str) -> dict[int, set[str]] | None:
+    """CONTRIBUTING.md 的 tier 表 → {tier: {仓名}}。
+
+    ## 为什么单独解析
+
+    这张表与 profile 的生成区**形态不同**（profile 用 markdown 链接 + · 分隔，
+    CONTRIBUTING 用反引号 + 空格分隔）⇒ 解析口径不同，但比对的是同一件事：
+    **每个 tier 的仓集合**。
+
+    ## 为什么它也得有门禁
+
+    CONTRIBUTING.md 原文写着「上表与 matrix-tools/modules.json 逐仓一致，由本仓
+    scripts/verify_profile_tiers.py 在 CI 里比对」——而**本脚本此前只查 profile**：
+    承诺是假的（实测 2026-11-23 顺带发现：那张表当时也确实少一个仓）。
+    ⇒ 要么加守卫，要么改文案；本脚本选择加守卫（把承诺改成真的）。
+    """
+    lines = text.splitlines()
+    start = None
+    for i, ln in enumerate(lines):
+        if re.match(r"^\|\s*tier\s*\|", ln):
+            start = i
+            break
+    if start is None:
+        return None
+    out: dict[int, set[str]] = {}
+    for ln in lines[start + 1:]:
+        if not ln.strip().startswith("|"):
+            break
+        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        try:
+            tier = int(cells[0])
+        except ValueError:
+            continue
+        names = set()
+        for token in re.split(r"[\s、,，·]+", cells[1]):
+            token = token.strip().strip(chr(96))
+            if token:
+                names.add(token)
+        out[tier] = names
+    return out
+
+
+def check_contributing(text: str, modules: list[dict]) -> list[str]:
+    """CONTRIBUTING.md 的 tier 表必须与数据源逐 tier 一致（双向：缺一多一都判红）。"""
+    got = parse_contributing_table(text)
+    if got is None:
+        return ["CONTRIBUTING.md 里找不到 tier 表（表头应是 | tier | 模块 |）"]
+    want: dict[int, set[str]] = {}
+    for m in modules:
+        want.setdefault(int(m.get("tier", 0)), set()).add(m["repo"])
+    problems: list[str] = []
+    for tier in sorted(set(got) | set(want)):
+        g, w = got.get(tier, set()), want.get(tier, set())
+        if g == w:
+            continue
+        detail = []
+        if w - g:
+            detail.append("缺 " + ", ".join(sorted(w - g)))
+        if g - w:
+            detail.append("多 " + ", ".join(sorted(g - w)))
+        problems.append("CONTRIBUTING.md 的 tier " + str(tier) + " 表与数据源不一致："
+                        + "；".join(detail))
+    return problems
+
+
 def check_count(text: str, modules: list[dict]) -> list[str]:
     """profile 里声明的模块总数必须等于数据源的模块数。"""
     problems = []
@@ -152,6 +220,8 @@ def main() -> int:
                     help="矩阵单一数据源 modules.json 路径")
     ap.add_argument("--profile", default=str(DEFAULT_PROFILE),
                     help="org profile 文件路径")
+    ap.add_argument("--contributing", default=str(DEFAULT_CONTRIBUTING),
+                    help="CONTRIBUTING.md 路径（它的 tier 表同样要逐项比对）")
     ap.add_argument("--write", action="store_true",
                     help="按数据源重写 profile 的生成区（默认只校验）")
     args = ap.parse_args()
@@ -193,13 +263,25 @@ def main() -> int:
         print(f"❌ {p}")
         problems.append(p)
 
+    # CONTRIBUTING.md 的 tier 表：文档写着「由本脚本在 CI 里比对」，
+    # 那这条比对就必须真的存在（此前只查 profile ⇒ 承诺是假的）。
+    contributing_path = Path(args.contributing).resolve()
+    if contributing_path.is_file():
+        ctext = contributing_path.read_text(encoding="utf-8")
+        for p in check_contributing(ctext, modules):
+            print(f"❌ {p}")
+            problems.append(p)
+    else:
+        print(f"⚠️ 找不到 CONTRIBUTING.md（{contributing_path}）——"
+              f"它的 tier 表本次未被比对")
+
     if problems:
         print("\n修法：")
         print("  1) 改 matrix-tools/modules.json（分层是数据源说了算，不要手改 profile）；")
         print("  2) 然后在本仓跑：python3 scripts/verify_profile_tiers.py --write")
         return 1
 
-    print(f"✅ profile 分层表与 {matrix_path.name} 一致"
+    print(f"✅ profile 与 CONTRIBUTING 的分层表都与 {matrix_path.name} 一致"
           f"（{len(modules)} 个仓，逐 tier 逐仓比对）")
     return 0
 

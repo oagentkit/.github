@@ -88,7 +88,7 @@ permissions:
 #
 # 为什么还包含 github.com/oekit/*：
 #   oekit 与 oagentkit 是同一个团队的 org（同一批维护者，仓库全 public），
-#   且是矩阵的公共基座——13 个模块仓大量以 oekit/pkg、oekit/concurrency、
+#   且是矩阵的公共基座——14 个模块仓大量以 oekit/pkg、oekit/concurrency、
 #   oekit/logx 为底座。按上面那段话自己的定义（"矩阵内的模块是**第一方**依赖"），
 #   oekit 落在同一条规则内，此前只是漏写了。
 #

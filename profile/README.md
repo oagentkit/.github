@@ -2,7 +2,7 @@
 
 > **O**pen **A**gent **K**it — 开源 · 易用 · Agent 工具集合
 
-**13 个独立发版的 Go 模块矩阵**，覆盖 Agent / LLM 编排工具链：模型客户端、MCP 工具池、
+**14 个独立发版的 Go 模块矩阵**，覆盖 Agent / LLM 编排工具链：模型客户端、MCP 工具池、
 技能库、知识检索、Agent 编排、运行时基础设施、安全围栏、DB 队列。
 依赖严格自底向上，全矩阵无环。
 
@@ -11,16 +11,16 @@
   <!-- oagentkit:generated:begin -->
   | tier | 模块 |
   |---|---|
-  | 0 | [guardx](https://github.com/oagentkit/guardx) · [runtime](https://github.com/oagentkit/runtime) · [textx](https://github.com/oagentkit/textx) |
+  | 0 | [guardx](https://github.com/oagentkit/guardx) · [runtime](https://github.com/oagentkit/runtime) · [textx](https://github.com/oagentkit/textx) · [toolname](https://github.com/oagentkit/toolname) |
   | 1 | [promptx](https://github.com/oagentkit/promptx) |
   | 2 | [llm](https://github.com/oagentkit/llm) · [mcpkit](https://github.com/oagentkit/mcpkit) · [obs](https://github.com/oagentkit/obs) · [queue](https://github.com/oagentkit/queue) · [rag](https://github.com/oagentkit/rag) · [skillkit](https://github.com/oagentkit/skillkit) · [toolgate](https://github.com/oagentkit/toolgate) · [tools](https://github.com/oagentkit/tools) |
   | 3 | [agent](https://github.com/oagentkit/agent) |
-  <!-- oagentkit:generated:end -->
+<!-- oagentkit:generated:end -->
 
   上表逐仓对齐 [`matrix-tools/modules.json`](https://github.com/oagentkit/matrix-tools)（矩阵单一数据源），
   本仓 `scripts/verify_profile_tiers.py` 在 CI 里逐 tier 逐仓比对——**改分层请先改数据源**。
 
-- 🤖 **AI Agent 入口**：13 个业务模块仓根目录均有 `AGENTS.md`（权威规范与硬规则）·
+- 🤖 **AI Agent 入口**：14 个业务模块仓根目录均有 `AGENTS.md`（权威规范与硬规则）·
   基建仓（`.github` / `matrix-tools` / 门面 `agentkit` / 文档站）的规范见各自 README 与本仓
   [CONTRIBUTING](https://github.com/oagentkit/.github/blob/main/CONTRIBUTING.md) ·
   全矩阵 [llms.txt](https://oagentkit.github.io/llms.txt) ·
@@ -102,5 +102,5 @@ oagentkit 与 [oekit](https://github.com/oekit)（Open Easy Kit，Go 微服务�
 ## 贡献
 
 见 [CONTRIBUTING](https://github.com/oagentkit/.github/blob/main/CONTRIBUTING.md)；
-13 个业务模块仓更细的工程红线见各自根目录的 `AGENTS.md`，
+14 个业务模块仓更细的工程红线见各自根目录的 `AGENTS.md`，
 本仓（`.github`）见 [AGENTS.md](https://github.com/oagentkit/.github/blob/main/AGENTS.md)。
