@@ -39,7 +39,7 @@ CONTRIBUTING.md / SECURITY.md / SUPPORT.md
 
 - 各仓以 `uses: oagentkit/.github/.github/workflows/go-ci.yml@main` 引用本仓。
 - ⇒ **本仓的 main 是全 org 的单点**：本仓 main 上的任何改动，会**同时**改变
-  13 个模块仓 + 基建仓的下一次 CI 运行结果。
+  14 个模块仓 + 基建仓的下一次 CI 运行结果。
 - 因为引用的是 `@main`（不是 tag），**没有「回退到旧版本」这个选项**——坏了就是全 org 一起坏。
 - 改动前必须逐条确认：
 
