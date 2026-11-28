@@ -465,3 +465,34 @@ jobs:
           name: receipts-report
           path: receipts-report.json
           if-no-files-found: ignore
+
+  api-lifecycle:
+    name: API lifecycle (定级登记)
+    # kernel apilifecheck 判据的矩阵侧推广（oagentkit/matrix-tools#256 / ADR-002）：
+    #   本仓已接入 api-lifecycle.yaml ⇒ 清单自洽 + 源码生产包↔清单双向覆盖
+    #   （新增包无定级判红）+ 包注释「// 生命周期:」标记对账，全套生效；
+    #   未接入 ⇒ 报「未接入」info、退出 0（opt-in 分批，ADR-002 §三——清单一放就跑不掉）。
+    # 判据单源在 matrix-tools（各仓只调用不复制判据）；python/pyyaml 走 matrix-tools
+    # 的共享 composite action（与 inventory job 同一份 setup 样板）。
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      # 调用方仓（源码扫描面）在 workspace 根；matrix-tools 只取判据脚本。
+      - uses: actions/checkout@v7
+
+      - name: Checkout matrix-tools（判据脚本）
+        uses: actions/checkout@v7
+        with:
+          repository: oagentkit/matrix-tools
+          path: matrix-tools
+
+      - uses: oagentkit/matrix-tools/.github/actions/setup-matrix-tools@main
+        with:
+          pyyaml: 'true'
+
+      - name: api-lifecycle 定级判定（本仓）
+        # 用绝对路径：Path(".").name 是空串会让根包对账错位（matrix-tools#266 已修，
+        # 这里仍用 GITHUB_WORKSPACE 双保险）。
+        run: python3 matrix-tools/scripts/verify_api_lifecycle.py --repo "$GITHUB_WORKSPACE"
