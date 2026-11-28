@@ -1,13 +1,13 @@
 # 贡献指南 — oagentkit
 
 感谢参与 oagentkit（Open Agent Kit）模块矩阵。本文件是 **全 org 共享** 的贡献约定；
-14 个业务模块仓更细的工程红线见各仓根目录的 `AGENTS.md`，
+16 个业务模块仓更细的工程红线见各仓根目录的 `AGENTS.md`，
 基建仓（`.github` / `matrix-tools` / 门面 `agentkit` / 文档站）见各自 README 与本仓的
 [AGENTS.md](https://github.com/oagentkit/.github/blob/main/AGENTS.md)。
 
 ## 矩阵结构
 
-贡献不是单仓事务 —— 14 个仓按 tier 严格自底向上，依赖方向是硬不变量：
+贡献不是单仓事务 —— 16 个仓按 tier 严格自底向上，依赖方向是硬不变量：
 
 | tier | 模块 |
 |---|---|
@@ -15,6 +15,8 @@
 | 1 | `promptx` |
 | 2 | `llm` `mcpkit` `obs` `queue` `rag` `skillkit` `toolgate` `tools` |
 | 3 | `agent` |
+| 4 | `goagent-kernel` |
+| 5 | `goagent-runtime` |
 
 tier N 的模块**不得**依赖 tier > N 的模块。
 
